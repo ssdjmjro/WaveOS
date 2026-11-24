@@ -6,36 +6,59 @@
 #include <algorithm>
 
 // ===================================================================== library
-// Compact path store: all song paths packed into 4KB blocks (no per-song heap chunk, no big
-// contiguous buffer) + a 16-bit sort order. ~45% of the RAM a vector<String> needs.
+// Compact library: every folder path stored once + file names packed into 4KB blocks.
+// Per song only 2 (folder) + 4 (name) + 2 (order) + 4 (hash) bytes. No per-song heap chunks.
+static uint32_t fnv(const char* s, uint32_t h = 2166136261u) { while (*s) { h ^= (uint8_t)*s++; h *= 16777619u; } return h; }
 struct PathPool {
   static constexpr int BS = 4096;
+  std::vector<String> dirs;      // "/music/Rock/Nirvana"
   std::vector<char*> blocks;
-  std::vector<uint32_t> off;   // (block << 12) | pos
-  std::vector<uint16_t> ord;   // display/sort order
+  std::vector<uint16_t> dirOf;
+  std::vector<uint32_t> nameOff; // (block << 12) | pos
+  std::vector<uint32_t> hash;    // fnv(full path), for stats / bookmarks
+  std::vector<uint16_t> ord;     // display order
   size_t used = BS;
   void clear() {
     for (auto b : blocks) free(b);
-    blocks.clear(); blocks.shrink_to_fit(); off.clear(); off.shrink_to_fit(); ord.clear(); ord.shrink_to_fit();
+    blocks.clear(); blocks.shrink_to_fit(); dirs.clear(); dirs.shrink_to_fit();
+    dirOf.clear(); dirOf.shrink_to_fit(); nameOff.clear(); nameOff.shrink_to_fit();
+    hash.clear(); hash.shrink_to_fit(); ord.clear(); ord.shrink_to_fit();
     used = BS;
   }
-  bool push_back(const String& s) {
-    size_t n = s.length() + 1;
-    if (n > 256 || off.size() >= 4000) return false;
-    if (used + n > BS) { char* b = (char*)malloc(BS); if (!b) return false; blocks.push_back(b); used = 0; }
-    memcpy(blocks.back() + used, s.c_str(), n);
-    off.push_back(((uint32_t)(blocks.size() - 1) << 12) | used);
-    ord.push_back(off.size() - 1);
+  int dirIndex(const String& d, bool add) {
+    for (int i = (int)dirs.size() - 1; i >= 0; i--) if (dirs[i] == d) return i;
+    if (!add) return -1;
+    dirs.push_back(d);
+    return dirs.size() - 1;
+  }
+  bool push_back(const String& full) {
+    int sl = full.lastIndexOf('/');
+    if (sl < 0 || ord.size() >= 4000) return false;
+    String d = sl == 0 ? String("") : full.substring(0, sl);
+    const char* nm = full.c_str() + sl + 1;
+    size_t n = strlen(nm) + 1;
+    if (n > 200) return false;
+    if (used + n > BS) { char* blk = (char*)malloc(BS); if (!blk) return false; blocks.push_back(blk); used = 0; }
+    memcpy(blocks.back() + used, nm, n);
+    dirOf.push_back(dirIndex(d, true));
+    nameOff.push_back(((uint32_t)(blocks.size() - 1) << 12) | used);
+    hash.push_back(fnv(full.c_str()));
+    ord.push_back(ord.size());
     used += n;
     return true;
   }
-  const char* c(int i) const { uint32_t o = off[ord[i]]; return blocks[o >> 12] + (o & 4095); }
-  String operator[](int i) const { return String(c(i)); }
+  int raw(int i) const { return ord[i]; }
+  const char* name(int i) const { uint32_t o = nameOff[ord[i]]; return blocks[o >> 12] + (o & 4095); }
+  const String& dir(int i) const { return dirs[dirOf[ord[i]]]; }
+  int dirId(int i) const { return dirOf[ord[i]]; }
+  uint32_t h(int i) const { return hash[ord[i]]; }
+  String operator[](int i) const { return dir(i) + "/" + name(i); }
   size_t size() const { return ord.size(); }
   bool empty() const { return ord.empty(); }
   void sortByName() {
-    auto base = [this](uint16_t k) { uint32_t o = off[k]; const char* p = blocks[o >> 12] + (o & 4095); const char* b = strrchr(p, '/'); return b ? b + 1 : p; };
-    std::sort(ord.begin(), ord.end(), [&](uint16_t a, uint16_t b) { return strcasecmp(base(a), base(b)) < 0; });
+    std::sort(ord.begin(), ord.end(), [&](uint16_t a, uint16_t b) {
+      uint32_t oa = nameOff[a], ob = nameOff[b];
+      return strcasecmp(blocks[oa >> 12] + (oa & 4095), blocks[ob >> 12] + (ob & 4095)) < 0; });
   }
 };
 
@@ -51,18 +74,18 @@ static bool isAudio(const String& n) {
 static void scanDir(const String& path, int depth) {
   File d = SD.open(path);
   if (!d || !d.isDirectory()) return;
+  std::vector<String> sub;
   while (files.size() < 1500) {
-    File f = d.openNextFile();
-    if (!f) break;
-    String n = f.name();
-    String full = path == "/" ? "/" + n : path + "/" + n;
-    bool dir = f.isDirectory();
-    f.close();
+    bool isDir = false;
+    String full = d.getNextFileName(&isDir);  // reads the directory only - no file is opened (much faster)
+    if (!full.length()) break;
+    String n = full.substring(full.lastIndexOf('/') + 1);
     if (n.startsWith(".")) continue;
-    if (dir) { if (depth > 0 && n != "System Volume Information") scanDir(full, depth - 1); }
+    if (isDir) { if (depth > 0 && n != "System Volume Information") sub.push_back(full); }
     else if (isAudio(n)) files.push_back(full);
   }
   d.close();
+  for (auto& s : sub) scanDir(s, depth - 1);
 }
 void scan() {
   files.clear();
@@ -73,7 +96,12 @@ void scan() {
   scanned = true;
 }
 int find(const String& p) {
-  for (int i = 0; i < (int)files.size(); i++) if (!strcmp(files.c(i), p.c_str())) return i;
+  uint32_t h = fnv(p.c_str());
+  for (int i = 0; i < (int)files.size(); i++) if (files.h(i) == h && files[i] == p) return i;
+  return -1;
+}
+int findHash(uint32_t h) {
+  for (int i = 0; i < (int)files.size(); i++) if (files.h(i) == h) return i;
   return -1;
 }
 void loadFavs() {
@@ -93,18 +121,15 @@ bool isFav(const String& p) { return std::find(favs.begin(), favs.end(), p) != f
 
 // folders = unique parent directories
 std::vector<String> folders() {
-  std::vector<String> out;
-  for (int i = 0; i < (int)files.size(); i++) {
-    String f = files[i];
-    String d = f.substring(0, f.lastIndexOf('/'));
-    if (std::find(out.begin(), out.end(), d) == out.end()) out.push_back(d);
-  }
+  std::vector<String> out = files.dirs;
   std::sort(out.begin(), out.end());
   return out;
 }
 std::vector<int> inFolder(const String& d) {
   std::vector<int> v;
-  for (int i = 0; i < (int)files.size(); i++) if (files[i].substring(0, files[i].lastIndexOf('/')) == d) v.push_back(i);
+  int id = files.dirIndex(d, false);
+  if (id < 0) return v;
+  for (int i = 0; i < (int)files.size(); i++) if (files.dirId(i) == id) v.push_back(i);
   return v;
 }
 // playlists (.m3u in /playlists)
@@ -135,7 +160,7 @@ std::vector<int> loadM3U(const String& name) {
     int idx = find(l.startsWith("/") ? l : "/playlists/" + l);
     if (idx < 0) {  // match by file name
       String fn = l.substring(l.lastIndexOf('/') + 1);
-      for (int i = 0; i < (int)files.size(); i++) if (files[i].endsWith("/" + fn)) { idx = i; break; }
+      for (int i = 0; i < (int)files.size(); i++) if (!strcmp(files.name(i), fn.c_str())) { idx = i; break; }
     }
     if (idx >= 0) v.push_back(idx);
   }
@@ -155,24 +180,25 @@ void appendM3U(const String& name, const String& path) {
 
 // ===================================================================== stats + bookmarks
 namespace Stats {
-struct S { String path; uint16_t count; uint32_t seq; };
+// keyed by a 32-bit hash of the song path (no path strings kept in RAM)
+struct S { uint32_t h; uint16_t count; uint32_t seq; };
 std::vector<S> st;
 uint32_t seqCtr = 0, totalSec = 0;
 bool dirty = false;
 uint32_t dirtyT = 0;
-struct BM { String path; uint32_t pos; };
+struct BM { uint32_t h; uint32_t pos; };
 std::vector<BM> bms;
 void load() {
   st.clear(); bms.clear();
   File f = SD.open("/waveos/stats.txt");
   if (f) {
-    while (f.available()) {
+    while (f.available() && st.size() < 150) {
       String l = f.readStringUntil('\n');
       if (l.startsWith("#total ")) { totalSec = l.substring(7).toInt(); continue; }
       int a = l.indexOf('\t'), b = l.indexOf('\t', a + 1);
       if (a < 0 || b < 0) continue;
-      S s{l.substring(b + 1), (uint16_t)l.substring(0, a).toInt(), (uint32_t)l.substring(a + 1, b).toInt()};
-      s.path.trim();
+      String p = l.substring(b + 1); p.trim();
+      S s{fnv(p.c_str()), (uint16_t)l.substring(0, a).toInt(), (uint32_t)l.substring(a + 1, b).toInt()};
       seqCtr = std::max(seqCtr, s.seq);
       st.push_back(s);
     }
@@ -180,12 +206,12 @@ void load() {
   }
   f = SD.open("/waveos/bookmarks.txt");
   if (f) {
-    while (f.available()) {
+    while (f.available() && bms.size() < 40) {
       String l = f.readStringUntil('\n');
       int a = l.indexOf('\t');
       if (a < 0) continue;
       String p = l.substring(a + 1); p.trim();
-      bms.push_back({p, (uint32_t)l.substring(0, a).toInt()});
+      bms.push_back({fnv(p.c_str()), (uint32_t)l.substring(0, a).toInt()});
     }
     f.close();
   }
@@ -194,41 +220,39 @@ void save() {
   if (!sdOK) return;
   File f = SD.open("/waveos/stats.txt", FILE_WRITE);
   if (f) {
-    f.printf("#total %u\n", totalSec);
-    for (auto& s : st) f.printf("%u\t%u\t%s\n", s.count, s.seq, s.path.c_str());
+    f.printf("#total %u\n", (unsigned)totalSec);
+    for (auto& s : st) { int i = Lib::findHash(s.h); if (i >= 0) f.printf("%u\t%u\t%s\n", s.count, (unsigned)s.seq, Lib::files[i].c_str()); }
     f.close();
   }
   f = SD.open("/waveos/bookmarks.txt", FILE_WRITE);
-  if (f) { for (auto& b : bms) f.printf("%u\t%s\n", b.pos, b.path.c_str()); f.close(); }
+  if (f) { for (auto& b : bms) { int i = Lib::findHash(b.h); if (i >= 0) f.printf("%u\t%s\n", (unsigned)b.pos, Lib::files[i].c_str()); } f.close(); }
 }
 void played(const String& p) {  // saved a bit later (not during the song change)
   dirty = true; dirtyT = millis();
-  for (auto& s : st) if (s.path == p) { s.count++; s.seq = ++seqCtr; return; }
-  st.push_back({p, 1, ++seqCtr});
-  if (st.size() > 150) {  // keep memory bounded: drop the least played
+  uint32_t h = fnv(p.c_str());
+  for (auto& s : st) if (s.h == h) { s.count++; s.seq = ++seqCtr; return; }
+  st.push_back({h, 1, ++seqCtr});
+  if (st.size() > 150) {
     auto it = std::min_element(st.begin(), st.end(), [](const S& a, const S& b) { return a.count != b.count ? a.count < b.count : a.seq < b.seq; });
     st.erase(it);
   }
 }
-std::vector<int> mostPlayed() {
+static std::vector<int> ranked(bool byCount) {
   std::vector<S> c = st;
-  std::sort(c.begin(), c.end(), [](const S& a, const S& b) { return a.count > b.count; });
+  std::sort(c.begin(), c.end(), [byCount](const S& a, const S& b) { return byCount ? a.count > b.count : a.seq > b.seq; });
   std::vector<int> v;
-  for (auto& s : c) { int i = Lib::find(s.path); if (i >= 0) v.push_back(i); if (v.size() >= 50) break; }
+  for (auto& s : c) { int i = Lib::findHash(s.h); if (i >= 0) v.push_back(i); if (v.size() >= 50) break; }
   return v;
 }
-std::vector<int> recent() {
-  std::vector<S> c = st;
-  std::sort(c.begin(), c.end(), [](const S& a, const S& b) { return a.seq > b.seq; });
-  std::vector<int> v;
-  for (auto& s : c) { int i = Lib::find(s.path); if (i >= 0) v.push_back(i); if (v.size() >= 50) break; }
-  return v;
-}
-int playCount(const String& p) { for (auto& s : st) if (s.path == p) return s.count; return 0; }
-uint32_t bookmark(const String& p) { for (auto& b : bms) if (b.path == p) return b.pos; return 0; }
+std::vector<int> mostPlayed() { return ranked(true); }
+std::vector<int> recent() { return ranked(false); }
+int countOfHash(uint32_t h) { for (auto& s : st) if (s.h == h) return s.count; return 0; }
+int playCount(const String& p) { return countOfHash(fnv(p.c_str())); }
+uint32_t bookmark(const String& p) { uint32_t h = fnv(p.c_str()); for (auto& b : bms) if (b.h == h) return b.pos; return 0; }
 void setBookmark(const String& p, uint32_t pos) {
-  for (auto& b : bms) if (b.path == p) { b.pos = pos; return; }
-  bms.push_back({p, pos});
+  uint32_t h = fnv(p.c_str());
+  for (auto& b : bms) if (b.h == h) { b.pos = pos; return; }
+  bms.push_back({h, pos});
   if (bms.size() > 40) bms.erase(bms.begin());
 }
 }  // namespace Stats
@@ -553,26 +577,26 @@ struct MusicApp : App {
   struct Row { uint8_t type; int16_t idx, aux; };  // tiny: names are looked up only when drawn
   std::vector<String> hdrs;                         // section header texts
   const char* SHUF[3] = {"SHUFFLE ALL SONGS", "SHUFFLE FAVOURITES", "SHUFFLE THIS LIST"};
-  // path segments without allocating: /music/<Genre>/<Artist>/<Title>.ext
-  static void seg(const String& p, int which, const char*& s, int& n) {  // 0 title, 1 artist, 2 genre
-    const char* c = p.c_str();
-    int L = p.length(), last = p.lastIndexOf('/');
-    if (which == 0) { int dot = p.lastIndexOf('.'); s = c + last + 1; n = (dot > last ? dot : L) - last - 1; return; }
-    int prev = last > 0 ? p.lastIndexOf('/', last - 1) : -1;
-    if (which == 1) { s = c + prev + 1; n = last - prev - 1; return; }
-    if (p.startsWith("/music/")) { int e = p.indexOf('/', 7); if (e > 0 && e < last) { s = c + 7; n = e - 7; return; } }
+  // song segments straight from the library store (no allocation): title / artist / genre
+  static void seg(int i, int which, const char*& s, int& n) {  // 0 title, 1 artist, 2 genre
+    if (which == 0) { s = Lib::files.name(i); const char* dot = strrchr(s, '.'); n = dot ? dot - s : strlen(s); return; }
+    const String& d = Lib::files.dir(i);
+    const char* c = d.c_str();
+    int last = d.length();
+    if (which == 1) { int prev = d.lastIndexOf('/'); s = c + prev + 1; n = last - prev - 1; return; }
+    if (d.startsWith("/music/")) { int e = d.indexOf('/', 7); if (e > 0) { s = c + 7; n = e - 7; return; } }
     s = "OTHER"; n = 5;
   }
-  static int cmpSeg(const String& a, const String& b, int which) {
+  static int cmpSeg(int a, int b, int which) {
     const char *x, *y; int nx, ny;
     seg(a, which, x, nx); seg(b, which, y, ny);
     for (int i = 0; i < nx && i < ny; i++) { int d = toupper((unsigned char)x[i]) - toupper((unsigned char)y[i]); if (d) return d; }
     return nx - ny;
   }
-  static String segStr(const String& p, int which) { const char* s; int n; seg(p, which, s, n); String r; r.reserve(n); for (int i = 0; i < n; i++) r += s[i]; return r; }
+  static String segStr(int i, int which) { const char* s; int n; seg(i, which, s, n); String r; r.reserve(n); for (int k = 0; k < n; k++) r += s[k]; return r; }
   String rowLabel(const Row& r) {
     switch (r.type) {
-      case R_SONG: return segStr(Lib::files[r.idx], 0);
+      case R_SONG: return segStr(r.idx, 0);
       case R_FOLDER: return parentName(folderCache[r.idx] + "/x");
       case R_LIST: return r.idx == 0 ? String("MOST PLAYED") : r.idx == 1 ? String("RECENTLY PLAYED") : baseName(plCache[r.idx - 2]);
       case R_HEADER: return hdrs[r.aux];
@@ -580,7 +604,7 @@ struct MusicApp : App {
     }
   }
   String rowSub(const Row& r) {
-    if (r.type == R_SONG) return segStr(Lib::files[r.idx], 1);
+    if (r.type == R_SONG) return segStr(r.idx, 1);
     if (r.type == R_FOLDER || r.type == R_SHUFFLE) return String(r.type == R_FOLDER ? r.aux : r.idx);
     return String();
   }
@@ -622,13 +646,12 @@ struct MusicApp : App {
   void addSongs(std::vector<int> v, bool sorted, int shuffleLabel) {
     if (v.size() > 1 && shuffleLabel >= 0) rows.push_back({R_SHUFFLE, (int16_t)v.size(), (int16_t)shuffleLabel});
     if (sorted) {
-      const auto& F = Lib::files;
-      if (sortMode == 3) std::stable_sort(v.begin(), v.end(), [](int x, int y) { return Stats::playCount(Lib::files[x]) > Stats::playCount(Lib::files[y]); });
-      else if (sortMode == 0) std::sort(v.begin(), v.end(), [&](int x, int y) { return cmpSeg(F[x], F[y], 0) < 0; });
-      else if (sortMode == 1) std::sort(v.begin(), v.end(), [&](int x, int y) { int d = cmpSeg(F[x], F[y], 1); return d ? d < 0 : cmpSeg(F[x], F[y], 0) < 0; });
-      else std::sort(v.begin(), v.end(), [&](int x, int y) {
-        int d = cmpSeg(F[x], F[y], 2); if (d) return d < 0;
-        d = cmpSeg(F[x], F[y], 1); return d ? d < 0 : cmpSeg(F[x], F[y], 0) < 0; });
+      if (sortMode == 3) std::stable_sort(v.begin(), v.end(), [](int x, int y) { return Stats::countOfHash(Lib::files.h(x)) > Stats::countOfHash(Lib::files.h(y)); });
+      else if (sortMode == 0) std::sort(v.begin(), v.end(), [](int x, int y) { return cmpSeg(x, y, 0) < 0; });
+      else if (sortMode == 1) std::sort(v.begin(), v.end(), [](int x, int y) { int d = cmpSeg(x, y, 1); return d ? d < 0 : cmpSeg(x, y, 0) < 0; });
+      else std::sort(v.begin(), v.end(), [](int x, int y) {
+        int d = cmpSeg(x, y, 2); if (d) return d < 0;
+        d = cmpSeg(x, y, 1); return d ? d < 0 : cmpSeg(x, y, 0) < 0; });
     }
     rows.reserve(rows.size() + v.size() + 40);
     int prev = -1;
@@ -636,10 +659,10 @@ struct MusicApp : App {
       if (sorted && sortMode != 3) {
         bool newSec;
         if (prev < 0) newSec = true;
-        else if (sortMode == 0) { const char *a, *b; int na, nb; seg(Lib::files[i], 0, a, na); seg(Lib::files[prev], 0, b, nb); newSec = toupper((unsigned char)a[0]) != toupper((unsigned char)b[0]) && (isalpha((unsigned char)a[0]) || isalpha((unsigned char)b[0])); }
-        else newSec = cmpSeg(Lib::files[i], Lib::files[prev], sortMode == 1 ? 1 : 2) != 0;
+        else if (sortMode == 0) { const char *a, *b; int na, nb; seg(i, 0, a, na); seg(prev, 0, b, nb); newSec = toupper((unsigned char)a[0]) != toupper((unsigned char)b[0]) && (isalpha((unsigned char)a[0]) || isalpha((unsigned char)b[0])); }
+        else newSec = cmpSeg(i, prev, sortMode == 1 ? 1 : 2) != 0;
         if (newSec) {
-          String h = segStr(Lib::files[i], sortMode == 0 ? 0 : sortMode == 1 ? 1 : 2);
+          String h = segStr(i, sortMode == 0 ? 0 : sortMode == 1 ? 1 : 2);
           h.toUpperCase();
           if (sortMode == 0) h = h.length() && isalpha((unsigned char)h[0]) ? h.substring(0, 1) : String("#");
           hdrs.push_back(h);
@@ -676,11 +699,8 @@ struct MusicApp : App {
         for (size_t i = 0; i < f.size(); i++) {
           if (f[i].first != lastG) { hdrs.push_back(f[i].first); rows.push_back({R_HEADER, -1, (int16_t)(hdrs.size() - 1)}); lastG = f[i].first; }
           int idx = std::find(folderCache.begin(), folderCache.end(), f[i].second) - folderCache.begin();
-          int cnt = 0, L = f[i].second.length();
-          for (int q = 0; q < (int)Lib::files.size(); q++) {
-            const char* p = Lib::files.c(q);
-            if ((int)strlen(p) > L && p[L] == '/' && !strncmp(p, f[i].second.c_str(), L) && !strchr(p + L + 1, '/')) cnt++;
-          }
+          int cnt = 0, did = Lib::files.dirIndex(f[i].second, false);
+          for (int q = 0; q < (int)Lib::files.size(); q++) if (Lib::files.dirId(q) == did) cnt++;
           rows.push_back({R_FOLDER, (int16_t)idx, (int16_t)cnt});
         }
         break;
