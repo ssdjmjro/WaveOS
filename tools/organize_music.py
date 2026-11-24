@@ -18,12 +18,74 @@ GENRES = {
              "The Jimi Hendrix Experience", "Slipknot", "Led Zeppelin", "Derek & The Dominos", "Dire Straits",
              "Radiohead", "Ozzy Osbourne", "The White Stripes", "Metallica", "The Police"],
     "Guitar": ["Polyphia", "Ichika Nito", "Tim Henson", "Danny Yau", "Sungha Jung", "Manuel Gardner Fernandes",
-               "Marcin", "John Mayer", "Zenith Akirae", "Seven Kayne", "福島拓人", "TACT"],
+               "Marcin", "John Mayer", "Zenith Akirae", "Seven Kayne", "福島拓人", "TACT", "Kotaro Oshio", "BERNTH",
+               "Alexandr Misko", "sundial", "Tommy Emmanuel", "Steve Vai", "Depapepe", "Shin Izumi", "Iqbal Gumilar",
+               "AironA", "Jinsan Kim", "Davie504", "Showmain", "Leo Birenberg"],
     "K-Pop": ["BABYMONSTER", "BIGBANG", "G-DRAGON", "GD", "Stray Kids", "aespa", "(G)I-DLE", "BLACKPINK", "ILLIT",
-              "TAEYANG", "T.O.P", "LE SSERAFIM", "CORTIS", "IVE", "DAYOUNG", "PSY", "HUNTR/X", "MEOVV"],
-    "J-Pop": ["Fujii Kaze"],
+              "TAEYANG", "T.O.P", "LE SSERAFIM", "CORTIS", "IVE", "DAYOUNG", "PSY", "HUNTR/X", "MEOVV", "SUPER JUNIOR",
+              "DAESUNG", "KiiiKiii", "YENA", "NMIXX", "ASMRZ", "LILY"],
+    "J-Pop": ["Fujii Kaze", "YiNoYume", "QUEENDOM"],
+    "Pop": ["AJR", "Ariana Grande", "Celtic Woman", "RJ Pasin"],
 }
+# uploader / label channels: the real artist is taken from the video title instead
+LABELS = {"jyp entertainment", "smtown", "saintives", "mystic plug records ii", "starship", "stone music", "kcon official",
+          "ppw", "namolla family hotshow", "the first take", "hybe labels", "riserecords"}
+ALIAS = {"ichika": "Ichika Nito", "stevevaihimself": "Steve Vai", "officialpsy": "PSY", "i-dle (아이들)": "(G)I-DLE",
+         "jin san kim 김진산": "Jinsan Kim", "showmaîn邱小明": "Showmain", "officialgdragon": "G-DRAGON", "yinoyume🪭": "YiNoYume",
+         "depapepe": "Depapepe", "kotaro oshio, depapepe": "Kotaro Oshio", "平民防空洞": "QUEENDOM"}
+
+
+def artist_from_title(title):
+    t = ascii_punct(title)
+    t = re.sub(r"^\[[^\]]*\]\s*", "", t)                      # [MV] / [KCON ...]
+    m = re.match(r"^\s*([^'\"(\-]+?)\s*(?:\(([^)]*)\))?\s*(?:-|'|\")", t)
+    if not m:
+        return None
+    a = m.group(1).strip()
+    if re.search(r"[A-Za-z]", m.group(2) or "") and not re.search(r"[A-Za-z]", a):
+        a = m.group(2)                                             # 대성(DAESUNG) -> DAESUNG
+    a = re.sub(r"\s*\((?:[^()]|\([^)]*\))*\)\s*$", "", a)          # strip trailing (Korean name)
+    a = re.sub(r"\s+[^\x00-\x7f].*$", "", a).strip()                # SUPER JUNIOR 슈퍼주니어 -> SUPER JUNIOR
+    if a.lower().startswith("(여자)아이들") or "(g)i-dle" in t.lower()[:30]:
+        return "(G)I-DLE"
+    return a or None
+
+
+def fix_artist(raw, title):
+    r = _fix_artist(raw, title)
+    if r.upper().startswith("LILY SULLYOON"):
+        r = "NMIXX"
+    return re.sub(r"\s+", " ", r).strip()
+
+
+def _fix_artist(raw, title):
+    a = ascii_punct(raw).strip()
+    low = a.lower()
+    if low in ALIAS:
+        return ALIAS[low]
+    first = re.split(r",\s*", a)[0].strip()
+    if low in LABELS or first.lower() in LABELS:
+        rest = [x.strip() for x in re.split(r",\s*", a)[1:] if x.strip().lower() not in LABELS]
+        return rest[0] if rest else (artist_from_title(title) or a)
+    if first.lower() in ALIAS:
+        return ALIAS[first.lower()]
+    return a
+
+
+def cover_title(title, artist):
+    """'(Michael Jackson) Billie Jean - Sungha Jung (Guitarlele)' -> 'Billie Jean (Guitarlele) (Michael Jackson cover)'"""
+    t = title
+    t = re.sub(r"\s*-\s*" + re.escape(artist) + r"\b", "", t, flags=re.I).strip()
+    m = re.match(r"^\(([^)]+)\)\s*(.+)$", t)
+    if m:
+        orig, rest = m.group(1).strip(), m.group(2).strip()
+        rest = rest.replace("_", " ")
+        if orig.lower() in ("original", artist.lower()):
+            return rest
+        return f"{rest} ({orig} cover)"
+    return t.replace("_", " ")
 SMART = {  # extra playlists by artist keyword
+    "Sungha Jung": ["sungha jung"],
     "Polyphia & Tim Henson": ["polyphia", "tim henson"],
     "Ichika Nito": ["ichika"],
     "Nirvana": ["nirvana"],
@@ -64,10 +126,12 @@ def main_artist(a):
 
 def genre_of(artist):
     al = artist.lower()
-    for g, names in GENRES.items():
-        for n in names:
-            if al == n.lower() or al.startswith(n.lower()):
-                return g
+    for g, names in GENRES.items():  # exact name first
+        if any(al == n.lower() for n in names):
+            return g
+    for g, names in GENRES.items():  # then "Name feat..." / "Name, Other" style prefixes (whole words only)
+        if any(re.match(re.escape(n.lower()) + r"(\W|$)", al) for n in names):
+            return g
     return "Other"
 
 
@@ -100,18 +164,29 @@ def main():
     os.makedirs(os.path.join(out, "playlists"), exist_ok=True)
 
     seen = {}          # (artist, title) -> sd path
+    seen_id = {}       # youtube video id -> sd path (exact same song)
     playlists = {}     # name -> [sd paths]
     rows = []
-    for d in sorted(glob.glob(os.path.join(args.src, "YouTube_Playlist_*"))):
+    skipped = 0
+    dirs = sorted(glob.glob(os.path.join(args.src, "YouTube_Playlist_*"))) + [d for d in [os.path.join(args.src, "mus for waveos")] if os.path.isdir(d)]
+    for d in dirs:
         plname = os.path.basename(d).replace("YouTube_Playlist_", "")
-        plname = {"Shuffled": "Shuffled Mix", "Rock": "Rock Classics"}.get(plname, plname)
+        plname = {"Shuffled": "Shuffled Mix", "Rock": "Rock Classics", "mus for waveos": "New Additions"}.get(plname, plname)
         for f in sorted(glob.glob(os.path.join(d, "*.mp3"))):
             try:
                 tags = ID3(f)
             except Exception:
                 tags = ID3()
-            raw_artist = str(tags.get("TPE1", "")) or "Unknown"
-            title = clean_title(str(tags.get("TIT2", "")) or re.sub(r"^\d+ - ", "", os.path.splitext(os.path.basename(f))[0]), main_artist(raw_artist))
+            vid = (re.search(r"v=([\w-]{11})", str(tags.get("TXXX:purl", ""))) or [None, None])[1]
+            if vid and vid in seen_id:  # exact same video already in the library
+                playlists.setdefault(plname, []).append(seen_id[vid])
+                skipped += 1
+                continue
+            raw_title = str(tags.get("TIT2", "")) or re.sub(r"^\d+ - ", "", os.path.splitext(os.path.basename(f))[0])
+            raw_artist = fix_artist(str(tags.get("TPE1", "")) or "Unknown", raw_title)
+            title = clean_title(raw_title, main_artist(raw_artist))
+            if not CHANNELS.get(os.path.basename(f)):  # new files: tag artist is the performer
+                title = cover_title(title, main_artist(raw_artist))
             perf, is_cover = performer(f, raw_artist, title)
             if is_cover:
                 orig = main_artist(raw_artist)
@@ -123,6 +198,8 @@ def main():
                 title_full = title  # keep collab info in the artist tag only
             key = (artist.lower(), re.sub(r"\W", "", title.lower()))
             genre = genre_of(artist)
+            if key in seen:
+                skipped += 1
             if key not in seen:
                 rel = f"/music/{safe(genre)}/{safe(artist)}/{safe(title)}.mp3"
                 dst = out + rel
@@ -140,8 +217,19 @@ def main():
                     t.save(dst, v2_version=3)
                 seen[key] = rel
                 rows.append((genre, artist, title, rel, raw_artist))
+            if vid:
+                seen_id[vid] = seen[key]
             playlists.setdefault(plname, []).append(seen[key])
 
+    # the full YouTube playlist in its original order (from tools/playlist_order.txt: index|id|title|channel)
+    order_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "playlist_order.txt")
+    if os.path.exists(order_file):
+        full = []
+        for line in open(order_file, encoding="utf-8"):
+            parts = line.rstrip("\n").split("|")
+            if len(parts) >= 2 and parts[1] in seen_id and seen_id[parts[1]] not in full:
+                full.append(seen_id[parts[1]])
+        playlists["My YouTube Playlist"] = full
     for g in sorted({r[0] for r in rows}):
         playlists[g] = [r[3] for r in sorted(rows, key=lambda r: (r[1].lower(), r[2].lower())) if r[0] == g]
     for name, kws in SMART.items():
@@ -155,7 +243,7 @@ def main():
             for p in paths:
                 fh.write(p + "\n")
 
-    print(f"{len(rows)} unique songs -> {out}")
+    print(f"{len(rows)} unique songs -> {out}   ({skipped} duplicates skipped)")
     for g in sorted({r[0] for r in rows}):
         print(f"  {g:7} {sum(1 for r in rows if r[0] == g)} songs, {len({r[1] for r in rows if r[0] == g})} artists")
     print("playlists:", ", ".join(f"{k} ({len(v)})" for k, v in playlists.items() if v))
