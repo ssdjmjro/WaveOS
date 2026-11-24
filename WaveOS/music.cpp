@@ -6,8 +6,41 @@
 #include <algorithm>
 
 // ===================================================================== library
+// Compact path store: all song paths packed into 4KB blocks (no per-song heap chunk, no big
+// contiguous buffer) + a 16-bit sort order. ~45% of the RAM a vector<String> needs.
+struct PathPool {
+  static constexpr int BS = 4096;
+  std::vector<char*> blocks;
+  std::vector<uint32_t> off;   // (block << 12) | pos
+  std::vector<uint16_t> ord;   // display/sort order
+  size_t used = BS;
+  void clear() {
+    for (auto b : blocks) free(b);
+    blocks.clear(); blocks.shrink_to_fit(); off.clear(); off.shrink_to_fit(); ord.clear(); ord.shrink_to_fit();
+    used = BS;
+  }
+  bool push_back(const String& s) {
+    size_t n = s.length() + 1;
+    if (n > 256 || off.size() >= 4000) return false;
+    if (used + n > BS) { char* b = (char*)malloc(BS); if (!b) return false; blocks.push_back(b); used = 0; }
+    memcpy(blocks.back() + used, s.c_str(), n);
+    off.push_back(((uint32_t)(blocks.size() - 1) << 12) | used);
+    ord.push_back(off.size() - 1);
+    used += n;
+    return true;
+  }
+  const char* c(int i) const { uint32_t o = off[ord[i]]; return blocks[o >> 12] + (o & 4095); }
+  String operator[](int i) const { return String(c(i)); }
+  size_t size() const { return ord.size(); }
+  bool empty() const { return ord.empty(); }
+  void sortByName() {
+    auto base = [this](uint16_t k) { uint32_t o = off[k]; const char* p = blocks[o >> 12] + (o & 4095); const char* b = strrchr(p, '/'); return b ? b + 1 : p; };
+    std::sort(ord.begin(), ord.end(), [&](uint16_t a, uint16_t b) { return strcasecmp(base(a), base(b)) < 0; });
+  }
+};
+
 namespace Lib {
-std::vector<String> files;
+PathPool files;
 std::vector<String> favs;
 bool scanned = false;
 
@@ -36,12 +69,11 @@ void scan() {
   if (!sdOK) { scanned = true; return; }
   scanDir("/music", 5);
   if (files.empty()) scanDir("/", 1);
-  std::sort(files.begin(), files.end(), [](const String& a, const String& b) {
-    String x = baseName(a), y = baseName(b); x.toLowerCase(); y.toLowerCase(); return x < y; });
+  files.sortByName();
   scanned = true;
 }
 int find(const String& p) {
-  for (int i = 0; i < (int)files.size(); i++) if (files[i] == p) return i;
+  for (int i = 0; i < (int)files.size(); i++) if (!strcmp(files.c(i), p.c_str())) return i;
   return -1;
 }
 void loadFavs() {
@@ -62,7 +94,8 @@ bool isFav(const String& p) { return std::find(favs.begin(), favs.end(), p) != f
 // folders = unique parent directories
 std::vector<String> folders() {
   std::vector<String> out;
-  for (auto& f : files) {
+  for (int i = 0; i < (int)files.size(); i++) {
+    String f = files[i];
     String d = f.substring(0, f.lastIndexOf('/'));
     if (std::find(out.begin(), out.end(), d) == out.end()) out.push_back(d);
   }
@@ -238,6 +271,8 @@ static bool imageDims(const uint8_t* d, size_t n, int& w, int& h) {
 static void makeArt(const uint8_t* d, size_t n) {
   int w = 0, h = 0;
   if (!imageDims(d, n, w, h) || w <= 0 || h <= 0) return;
+  if (d[0] == 0x89 && (n > 16000 || w * h > 320 * 320)) return;  // PNG decoding needs lots of RAM: small ones only
+  if (w * h > 800 * 800) return;
   M5Canvas sp(&M5Cardputer.Display);
   sp.setColorDepth(16);
   if (!sp.createSprite(28, 28)) return;
@@ -264,7 +299,7 @@ static void artFromFile(const String& p) {
   File f = SD.open(p);
   if (!f) return;
   size_t n = f.size();
-  if (n > 120000 || n + 40000 > ESP.getMaxAllocHeap()) { f.close(); return; }
+  if (n > 40000 || n + 50000 > ESP.getMaxAllocHeap()) { f.close(); return; }
   uint8_t* b = (uint8_t*)malloc(n);
   if (b) { f.read(b, n); makeArt(b, n); free(b); }
   f.close();
@@ -299,7 +334,7 @@ static void readID3(const String& path) {
       f.read(b, fs);
       String s = clean(b + 1, fs - 1, b[0]);
       if (isT) title = s; else if (isA) artist = s; else album = s;
-    } else if ((!strcmp(id, "APIC") || !strcmp(id, "PIC")) && !hasArt && fs < 120000 && fs + 40000 < ESP.getMaxAllocHeap()) {
+    } else if ((!strcmp(id, "APIC") || !strcmp(id, "PIC")) && !hasArt && fs < 40000 && fs + 50000 < ESP.getMaxAllocHeap()) {
       uint8_t* b = (uint8_t*)malloc(fs);
       if (b) {
         f.read(b, fs);
@@ -409,7 +444,7 @@ bool play(int idx, float start = -1) {
   cur = idx;
   const String& p = Lib::files[idx];
   if (start < 0) start = Stats::bookmark(p);  // long files continue where you stopped
-  if (!Music::open(p.c_str(), start)) { toast(Music::error(), 3000); return false; }
+  if (!Music::open(p.c_str(), start)) { toast(Music::error(), 3000); memLog("playfail"); return false; }
   Music::setSpeed(speed);
   Music::setEQ(EQ[eq].b, EQ[eq].t);
   Music::setGain(1);
@@ -458,6 +493,7 @@ void loadState() {
 void libEnsureScanned() {
   if (Lib::scanned) return;
   Lib::scan(); Lib::loadFavs(); Stats::load();
+  memLog("scan");
   Ctl::setSource({}, "ALL SONGS");
   Ctl::loadState();
 }
@@ -579,7 +615,7 @@ struct MusicApp : App {
   void addSongs(std::vector<int> v, bool sorted, int shuffleLabel) {
     if (v.size() > 1 && shuffleLabel >= 0) rows.push_back({R_SHUFFLE, (int16_t)v.size(), (int16_t)shuffleLabel});
     if (sorted) {
-      const std::vector<String>& F = Lib::files;
+      const auto& F = Lib::files;
       if (sortMode == 3) std::stable_sort(v.begin(), v.end(), [](int x, int y) { return Stats::playCount(Lib::files[x]) > Stats::playCount(Lib::files[y]); });
       else if (sortMode == 0) std::sort(v.begin(), v.end(), [&](int x, int y) { return cmpSeg(F[x], F[y], 0) < 0; });
       else if (sortMode == 1) std::sort(v.begin(), v.end(), [&](int x, int y) { int d = cmpSeg(F[x], F[y], 1); return d ? d < 0 : cmpSeg(F[x], F[y], 0) < 0; });
@@ -634,7 +670,10 @@ struct MusicApp : App {
           if (f[i].first != lastG) { hdrs.push_back(f[i].first); rows.push_back({R_HEADER, -1, (int16_t)(hdrs.size() - 1)}); lastG = f[i].first; }
           int idx = std::find(folderCache.begin(), folderCache.end(), f[i].second) - folderCache.begin();
           int cnt = 0, L = f[i].second.length();
-          for (auto& p : Lib::files) if ((int)p.length() > L && p[L] == '/' && p.startsWith(f[i].second) && p.indexOf('/', L + 1) < 0) cnt++;
+          for (int q = 0; q < (int)Lib::files.size(); q++) {
+            const char* p = Lib::files.c(q);
+            if ((int)strlen(p) > L && p[L] == '/' && !strncmp(p, f[i].second.c_str(), L) && !strchr(p + L + 1, '/')) cnt++;
+          }
           rows.push_back({R_FOLDER, (int16_t)idx, (int16_t)cnt});
         }
         break;

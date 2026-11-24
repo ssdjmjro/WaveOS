@@ -128,6 +128,7 @@ static volatile int metroBpm = 0, metroBeats = 4, metroBeat = 0;
 static double metroAcc = 0;
 static volatile uint32_t metroFlash = 0;
 void setVolume(uint8_t v) { lastVol = v; M5.Speaker.setVolume(v); }
+void useDelay() { if (!dline) dline = (int16_t*)calloc(DL, sizeof(int16_t)); }  // synth echo buffer: only when the synth is used
 
 // ---------------------------------------------------------------- arpeggiator (owner 7)
 constexpr uint8_t OWNER_ARP = 7;
@@ -1151,7 +1152,6 @@ void begin() {
   Music::mmux = xSemaphoreCreateMutex();
   Music::decMux = xSemaphoreCreateMutex();
   Looper::lmux = xSemaphoreCreateMutex();
-  dline = (int16_t*)calloc(DL, sizeof(int16_t));
   M5.Speaker.begin();
   xTaskCreatePinnedToCore(task, "audio", 8192, nullptr, 3, nullptr, 0);
   xTaskCreatePinnedToCore(Music::decTask, "decoder", 12288, nullptr, 2, nullptr, 0);

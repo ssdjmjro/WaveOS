@@ -38,6 +38,7 @@ struct SynthApp : App {
   static constexpr int NP = 9;
 
   SynthApp() { name = "SYNTH"; }
+  void enter() override { Audio::useDelay(); }
   bool wantsAllKeys() override { return true; }
   void releaseNote(uint8_t n) {
     if (arpMode) arpNote(n, false, 0); else noteOff(n, 0);

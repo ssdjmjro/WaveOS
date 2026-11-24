@@ -98,6 +98,12 @@ void applyRotation() {
   Serial.printf("[waveos] using rotation %d (%dx%d)\n", M5Cardputer.Display.getRotation(), (int)M5Cardputer.Display.width(), (int)M5Cardputer.Display.height());
 }
 
+void memLog(const char* where) {
+  if (!sdOK) return;
+  File f = SD.open("/waveos/mem.txt", FILE_APPEND);
+  if (f) { f.printf("%s v%s free=%u maxblock=%u minfree=%u\n", where, FW_VER, (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap(), (unsigned)ESP.getMinFreeHeap()); f.close(); }
+}
+
 // ------------------------------------------------------------------ app switching
 void openApp(App* a) {
   if (!a || a == cur) return;
@@ -612,6 +618,7 @@ void setup() {
       if (sdOK) { File f = SD.open("/waveos/crash.txt", FILE_APPEND); if (f) { f.printf("reset=%d %s heap=%u\n", (int)rr, why, (unsigned)ESP.getFreeHeap()); f.close(); } }
     }
   }
+  memLog("boot");
   openApp(appHome);
   // draw the first home frame while the backlight is off, then fade in
   cur->draw();

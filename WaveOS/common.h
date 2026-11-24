@@ -7,7 +7,7 @@
 #include <initializer_list>
 
 #define FW_NAME "WAVE OS"
-#define FW_VER  "1.12"
+#define FW_VER  "1.13"
 
 // ---------------------------------------------------------------- theme
 struct Theme {
@@ -122,7 +122,8 @@ String parentName(const String& path);
 void sendToGraph(const char* expr);  // calculator -> graph
 void volumeChange(int dir);          // +1 / -1, shows a volume overlay
 void applyVolume();                  // volume or 0 when muted (Fn+M)
-String clockString();                // "HH:MM" once the time was set over WiFi, else ""
+String clockString();
+void memLog(const char* where);       // append free-heap numbers to /waveos/mem.txt                // "HH:MM" once the time was set over WiFi, else ""
 namespace Batt { extern float mv; extern int pct; extern bool usb, charging; void tick(); }
 int loadScore(const char* key);
 void saveScore(const char* key, int val);

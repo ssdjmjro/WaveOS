@@ -10,6 +10,7 @@ constexpr int CHUNK = 64;    // sub-block for sample-accurate-ish timing (2 ms)
 
 void begin();
 void setVolume(uint8_t v);
+void useDelay();  // allocate the synth echo buffer (lazy, saves RAM)
 void suspend(bool s);            // release the speaker (so the mic can use I2S)
 void metronome(int bpm, int beats);  // bpm 0 = off
 int metroBeatNow();

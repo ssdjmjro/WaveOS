@@ -202,7 +202,7 @@ struct MidiApp : App {
     if (sdOK && SD.exists("/loops/jam.mid")) files.push_back("../loops/jam.mid");
     std::sort(files.begin(), files.end());
   }
-  void enter() override { ensureDir("/midi"); scan(); }
+  void enter() override { Audio::useDelay(); ensureDir("/midi"); scan(); }
   String fullPath(int i) { return files[i].startsWith("../") ? "/" + files[i].substring(3) : "/midi/" + files[i]; }
   void leave() override {
     for (auto& h : held) for (auto n : h.notes) { midiOut(0x80 | (cfg.midiCh - 1), n, 0); Audio::noteOff(n, 0); }
