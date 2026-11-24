@@ -1,0 +1,8 @@
+# build output, device backups and crash dumps
+build/
+backup/
+debug/
+*.bin
+*.elf
+# personal music-library data
+tools/channels.json
