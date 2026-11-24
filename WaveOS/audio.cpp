@@ -697,15 +697,16 @@ static bool startCodec(uint32_t byteOff, uint32_t skip) {
   freeCodec();
   src = new AudioFileSourceSD(curPath.c_str());
   if (!src->isOpen()) { freeCodec(); lastErr = "FILE WON'T OPEN"; return false; }
-  if (byteOff) src->seek(byteOff, SEEK_SET);
-  id3 = new AudioFileSourceID3(src);
+  // jump straight past the ID3 tag (the library's ID3 reader walks it 1 byte at a time:
+  // with big embedded cover art that took seconds between songs)
+  src->seek(std::max(byteOff, audioOff), SEEK_SET);
   if (fmt == F_MP3) gen = mp3Arena ? new AudioGeneratorMP3(mp3Arena, AudioGeneratorMP3::preAllocSize()) : new AudioGeneratorMP3();
   else if (fmt == F_FLAC) gen = new AudioGeneratorFLAC();
   else gen = new AudioGeneratorAAC();
   rHead = rTail = 0; cFrac = 0; consumed = 0;
   skipSamples = skip;
   decDone = false;
-  if (!gen->begin(id3, &ringOut)) {
+  if (!gen->begin(src, &ringOut)) {
     char b[48]; snprintf(b, sizeof(b), "DECODER NO MEMORY (%uK FREE)", (unsigned)(ESP.getMaxAllocHeap() / 1024));
     lastErr = b;
     freeCodec(); return false;

@@ -158,6 +158,8 @@ namespace Stats {
 struct S { String path; uint16_t count; uint32_t seq; };
 std::vector<S> st;
 uint32_t seqCtr = 0, totalSec = 0;
+bool dirty = false;
+uint32_t dirtyT = 0;
 struct BM { String path; uint32_t pos; };
 std::vector<BM> bms;
 void load() {
@@ -199,14 +201,14 @@ void save() {
   f = SD.open("/waveos/bookmarks.txt", FILE_WRITE);
   if (f) { for (auto& b : bms) f.printf("%u\t%s\n", b.pos, b.path.c_str()); f.close(); }
 }
-void played(const String& p) {
-  for (auto& s : st) if (s.path == p) { s.count++; s.seq = ++seqCtr; save(); return; }
+void played(const String& p) {  // saved a bit later (not during the song change)
+  dirty = true; dirtyT = millis();
+  for (auto& s : st) if (s.path == p) { s.count++; s.seq = ++seqCtr; return; }
   st.push_back({p, 1, ++seqCtr});
   if (st.size() > 150) {  // keep memory bounded: drop the least played
     auto it = std::min_element(st.begin(), st.end(), [](const S& a, const S& b) { return a.count != b.count ? a.count < b.count : a.seq < b.seq; });
     st.erase(it);
   }
-  save();
 }
 std::vector<int> mostPlayed() {
   std::vector<S> c = st;
@@ -449,6 +451,7 @@ static uint32_t shakeT = 0;
 static int shakeN = 0;
 void musicTick() {
   if (Music::takeEnded()) Ctl::next(false);
+  if (Stats::dirty && millis() - Stats::dirtyT > 20000) { Stats::dirty = false; Stats::save(); }
   Music::abTick();
   if (Ctl::sleepAt) {
     int32_t left = (int32_t)(Ctl::sleepAt - millis());
