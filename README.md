@@ -3,7 +3,7 @@
 Custom firmware for the **M5Stack Cardputer ADV** (ESP32-S3), with a polished pixel-art look and a neon wave theme.
 
 ## Features
-- **Music player:** MP3, FLAC, AAC and WAV. Songs, folders (by genre/artist), favourites, M3U playlists, queue, most played and recently played. Album art from tags or cover.jpg, synced `.lrc` lyrics, shuffle, repeat, 8 EQ presets, A-B repeat, speed 0.5–2×, sleep timer, bookmarks and resume. Power-saving screen-off and 80 MHz playback mode.
+- **Music player:** MP3, FLAC, AAC and WAV, fast and memory-light for large libraries (400+ songs). Songs, folders (by genre/artist), favourites, M3U playlists, queue, most played and recently played. Album art from tags or cover.jpg, synced `.lrc` lyrics, shuffle, repeat, 8 EQ presets, A-B repeat, speed 0.5–2×, sleep timer, bookmarks and resume. Power-saving screen-off and 80 MHz playback mode.
 - **Synth:** 5 waveforms, ADSR, resonant filter, delay, chord mode, arpeggiator, octave layering, hold and transpose.
 - **4-track looper:** count-in, overdub, quantize and metronome. Saves to SD and exports `.mid`.
 - **Drum machine:** 16 steps, 8 synthesized drums, 4 patterns, preset beats and swing. Syncs with the looper.
@@ -12,7 +12,6 @@ Custom firmware for the **M5Stack Cardputer ADV** (ESP32-S3), with a polished pi
 - **IR remote:** built-in TV codes, learn mode via a Grove IR receiver, macros, and a Flipper-format `.ir` file browser.
 - **Tools:** scientific calculator, graphing calculator, resistor color codes, electronics helper (Ohm, LED, divider, 555, capacitor codes), stopwatch/countdown.
 - **Notes:** Markdown editor on SD with autosave.
-- **WiFi:** browser file manager for the SD card (upload music without removing the card), internet time with a clock in the status bar.
 - **Flashlight** (white/warm/red/strobe/SOS) and **Morse** (type text, hear and see it).
 - **17 games:** Starfall, Runner, Snake, Blocks, Merge, Mines, Bricks, Duel, Glider, Echo, Typing, Rhythm, Rocks, Tanks, Four, Hopper, Maze.
 - **FUN (quiet, class-friendly):** Sudoku, Words, Pixel Pet, Doodle (saves BMP), Tic Tac Toe (vs CPU / 2 players), Bubbles, Oracle (dice, coin, ask, random picker). **Fn+M** mutes everything, **Fn+Q** is a boss key that jumps to the calculator.
@@ -33,7 +32,7 @@ If flashing fails, hold **G0** while plugging in USB.
 /music/<Genre>/<Artist>/*.mp3   /playlists/*.m3u   /midi/*.mid   /ir/**/*.ir
 /notes/*.md   /loops   /drums   /themes/custom.txt   /screenshots   /waveos (settings, stats)
 ```
-`tools/organize_music.py` tidies an MP3 collection into this layout. `tools/copy_to_sd.sh` syncs it to the card.
+`tools/organize_music.py` tidies an MP3 collection into this layout, and `tools/add_music.py` adds new songs to an existing card without touching what is already there. `tools/copy_to_sd.sh` syncs it to the card. WiFi file transfer is kept in `extras/`; it is not built in, so more RAM is free for music.
 
 ## Keys
 `; , . /` are arrows (also with **Fn**). `` ` `` is back. **G0** goes home. **Fn + - / =** changes volume and **Fn + [ / ]** changes brightness. Press `H`, `\` or `?` inside apps for help.
