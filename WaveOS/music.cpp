@@ -202,6 +202,10 @@ void save() {
 void played(const String& p) {
   for (auto& s : st) if (s.path == p) { s.count++; s.seq = ++seqCtr; save(); return; }
   st.push_back({p, 1, ++seqCtr});
+  if (st.size() > 150) {  // keep memory bounded: drop the least played
+    auto it = std::min_element(st.begin(), st.end(), [](const S& a, const S& b) { return a.count != b.count ? a.count < b.count : a.seq < b.seq; });
+    st.erase(it);
+  }
   save();
 }
 std::vector<int> mostPlayed() {
@@ -231,7 +235,6 @@ void setBookmark(const String& p, uint32_t pos) {
 namespace Meta {
 String title, artist, album;
 bool hasArt = false;
-uint16_t art[28 * 28];
 struct Lyr { float t; String s; };
 std::vector<Lyr> lyrics;
 
@@ -256,54 +259,6 @@ static String clean(const uint8_t* p, int n, int enc) {
   return s;
 }
 
-// read image bytes -> 28x28 dithered pixel art
-static bool imageDims(const uint8_t* d, size_t n, int& w, int& h) {
-  if (n > 24 && d[0] == 0x89 && d[1] == 'P') { w = (d[16] << 24) | (d[17] << 16) | (d[18] << 8) | d[19]; h = (d[20] << 24) | (d[21] << 16) | (d[22] << 8) | d[23]; return true; }
-  for (size_t i = 2; i + 9 < n;) {
-    if (d[i] != 0xFF) { i++; continue; }
-    uint8_t m = d[i + 1];
-    if (m == 0xC0 || m == 0xC1 || m == 0xC2) { h = d[i + 5] << 8 | d[i + 6]; w = d[i + 7] << 8 | d[i + 8]; return true; }
-    if (m == 0xD8 || m == 0x01 || (m >= 0xD0 && m <= 0xD7)) { i += 2; continue; }
-    i += 2 + (d[i + 2] << 8 | d[i + 3]);
-  }
-  return false;
-}
-static void makeArt(const uint8_t* d, size_t n) {
-  int w = 0, h = 0;
-  if (!imageDims(d, n, w, h) || w <= 0 || h <= 0) return;
-  if (d[0] == 0x89 && (n > 16000 || w * h > 320 * 320)) return;  // PNG decoding needs lots of RAM: small ones only
-  if (w * h > 800 * 800) return;
-  M5Canvas sp(&M5Cardputer.Display);
-  sp.setColorDepth(16);
-  if (!sp.createSprite(28, 28)) return;
-  sp.fillSprite(0);
-  float sc = 28.f / std::max(w, h);
-  bool ok = (d[0] == 0x89) ? sp.drawPng(d, n, 0, 0, 28, 28, 0, 0, sc, sc) : sp.drawJpg(d, n, 0, 0, 28, 28, 0, 0, sc, sc);
-  if (ok) {
-    static const uint8_t B[4][4] = {{0, 8, 2, 10}, {12, 4, 14, 6}, {3, 11, 1, 9}, {15, 7, 13, 5}};
-    for (int y = 0; y < 28; y++)
-      for (int x = 0; x < 28; x++) {
-        uint16_t c = sp.readPixel(x, y);
-        int r = (c >> 11) << 3, g = ((c >> 5) & 63) << 2, b = (c & 31) << 3;
-        int t = B[y & 3][x & 3] * 2 - 15;  // posterize to 3-3-2 levels with ordered dithering
-        r = constrain(((r + t * 2) / 36) * 36, 0, 255);
-        g = constrain(((g + t * 2) / 36) * 36, 0, 255);
-        b = constrain(((b + t * 3) / 72) * 72, 0, 255);
-        art[y * 28 + x] = RGB(r, g, b);
-      }
-    hasArt = true;
-  }
-  sp.deleteSprite();
-}
-static void artFromFile(const String& p) {
-  File f = SD.open(p);
-  if (!f) return;
-  size_t n = f.size();
-  if (n > 40000 || n + 50000 > ESP.getMaxAllocHeap()) { f.close(); return; }
-  uint8_t* b = (uint8_t*)malloc(n);
-  if (b) { f.read(b, n); makeArt(b, n); free(b); }
-  f.close();
-}
 static void readID3(const String& path) {
   File f = SD.open(path);
   if (!f) return;
@@ -334,19 +289,6 @@ static void readID3(const String& path) {
       f.read(b, fs);
       String s = clean(b + 1, fs - 1, b[0]);
       if (isT) title = s; else if (isA) artist = s; else album = s;
-    } else if ((!strcmp(id, "APIC") || !strcmp(id, "PIC")) && !hasArt && fs < 40000 && fs + 50000 < ESP.getMaxAllocHeap()) {
-      uint8_t* b = (uint8_t*)malloc(fs);
-      if (b) {
-        f.read(b, fs);
-        int enc = b[0];
-        size_t i = 1;
-        if (ver == 2) i += 3; else { while (i < fs && b[i]) i++; i++; }  // mime
-        i++;                                                            // picture type
-        if (enc == 1 || enc == 2) { while (i + 1 < fs && (b[i] || b[i + 1])) i += 2; i += 2; }
-        else { while (i < fs && b[i]) i++; i++; }
-        if (i < fs) makeArt(b + i, fs - i);
-        free(b);
-      }
     }
     pos += hl + fs;
   }
@@ -379,11 +321,6 @@ void load(const String& path) {
   String l = path; l.toLowerCase();
   if (l.endsWith(".mp3") || l.endsWith(".aac")) readID3(path);
   if (!title.length()) title = baseName(path);
-  if (!hasArt) {
-    String dir = path.substring(0, path.lastIndexOf('/') + 1);
-    const char* names[] = {"cover.jpg", "folder.jpg", "cover.png", "Cover.jpg", "Folder.jpg", "front.jpg", "album.jpg"};
-    for (auto n : names) if (SD.exists(dir + n)) { artFromFile(dir + n); if (hasArt) break; }
-  }
   loadLyrics(path);
 }
 int lyricIdx(float t) {
@@ -949,10 +886,6 @@ struct MusicApp : App {
 
   void drawArt(int x, int y, float ph) {
     panel(x, y, 60, 60, T.cyanD, T.bg0);
-    if (Meta::hasArt) {
-      for (int j = 0; j < 28; j++) for (int i = 0; i < 28; i++) cv.fillRect(x + 2 + i * 2, y + 2 + j * 2, 2, 2, Meta::art[j * 28 + i]);
-      return;
-    }
     for (int px = x + 2; px < x + 58; px++) {
       float t = (px - x - 2) / 56.f;
       int py = y + 30 - (int)(14 * sinf(2 * PI * t * 0.8f - 2.2f + ph) * (0.6f + vu));

@@ -9,7 +9,7 @@
 #include <esp_system.h>
 #include <new>
 
-SET_LOOP_TASK_STACK_SIZE(16 * 1024);  // JPEG album art + ID3 parsing need more than the default 8KB
+SET_LOOP_TASK_STACK_SIZE(12 * 1024);
 
 M5Canvas cv(&M5Cardputer.Display);
 bool sdOK = false;
@@ -110,7 +110,7 @@ void openApp(App* a) {
   if (cur) cur->leave();
   cur = a;
   try { cur->enter(); }
-  catch (std::bad_alloc&) { toast("OUT OF MEMORY", 2500); cur = appHome; }
+  catch (std::bad_alloc&) { char b[40]; snprintf(b, sizeof(b), "OUT OF MEMORY (%uK)", (unsigned)(ESP.getMaxAllocHeap() / 1024)); toast(b, 2500); memLog("oom-open"); cur = appHome; }
 }
 void goBack() { openApp(cur && cur->parent ? cur->parent : appHome); }
 void goHome() { openApp(appHome); }
@@ -150,7 +150,7 @@ struct HomeApp : App {
       case 3: return "USB + BT  .MID PLAYER";
       case 4: return "TUNER  METRONOME  CHORDS";
       case 5: return "TV  LEARN  MACROS  .IR";
-      case 6: return "WIFI CALC GRAPH TIMER...";
+      case 6: return "CALC GRAPH TIMER LIGHT";
       case 7: return "MARKDOWN ON SD";
       case 8: return "17 GAMES";
       case 9: return "QUIET GAMES FOR CLASS";
@@ -167,8 +167,8 @@ struct HomeApp : App {
                               {"STARFALL", "x"}, {"MINES", "m"}, {"DUEL", "d"}, {"ECHO", "h"}, {"RUNNER", "u"},
                               {"MAZE", "z"}, {"FOUR", "4"}, {"TANKS", "k"}, {"ROCKS", "q"}, {"HOPPER", "p"},
                               {"SUDOKU", "1"}, {"WORDS", "2"}, {"PET", "3"}, {"DOODLE", "5"}, {"TIC TAC TOE", "6"}, {"BUBBLES", "7"}, {"ORACLE", "8"},
-                              {"WIFI", "w"}, {"FLASHLIGHT", "l"}, {"MORSE", "o"}};
-    for (int i = 0; i < 32; i++) { String n = extra[i][0]; n.toLowerCase(); if (n.indexOf(lq) >= 0) res.push_back({3, i, String("APP  ") + extra[i][0]}); }
+                              {"FLASHLIGHT", "l"}, {"MORSE", "o"}};
+    for (int i = 0; i < 31; i++) { String n = extra[i][0]; n.toLowerCase(); if (n.indexOf(lq) >= 0) res.push_back({3, i, String("APP  ") + extra[i][0]}); }
     std::vector<int> songs;
     searchSongs(q, songs, 6);
     for (int s : songs) res.push_back({1, s, "SONG " + baseName(songPath(s))});
@@ -184,7 +184,7 @@ struct HomeApp : App {
     else {
       App* sub[] = {appCalc, appGraph, appResistor, appElec, appTimer, appSnake, app2048, appBlocks, appBreakout, appFlappy, appTyping, appRhythm,
                     appStarfall, appMines, appDuel, appEcho, appRunner, appMaze, appFour, appTanks, appRocks, appHopper,
-                    appSudoku, appWords, appPet, appDoodle, appTtt, appBubbles, appOracle, appWifi, appFlash, appMorse};
+                    appSudoku, appWords, appPet, appDoodle, appTtt, appBubbles, appOracle, appFlash, appMorse};
       openApp(sub[r.idx]);
     }
   }
@@ -584,7 +584,7 @@ void setup() {
   appHome = new HomeApp();
   appTools = new MenuApp("TOOLS", {{"CALC", "SCIENTIFIC", IC_CALC, &appCalc}, {"GRAPH", "F(X) PLOT", IC_GRAPH, &appGraph},
                                    {"RESISTOR", "COLOR CODE", IC_RES, &appResistor}, {"ELEC", "OHM LED 555", IC_ELEC, &appElec},
-                                   {"TIMER", "STOPWATCH", IC_TIMER, &appTimer}, {"WIFI", "FILES + CLOCK", IC_WIFI, &appWifi},
+                                   {"TIMER", "STOPWATCH", IC_TIMER, &appTimer},
                                    {"FLASHLIGHT", "LIGHT / SOS", IC_FLASH, &appFlash}, {"MORSE", "BEEP CODE", IC_MORSE, &appMorse}}, accYel);
   appGames = new MenuApp("GAMES", {{"STARFALL", "SHOOTER", IC_STARFALL, &appStarfall}, {"RUNNER", "ENDLESS", IC_RUNNER, &appRunner},
                                    {"SNAKE", "CLASSIC", IC_SNAKE, &appSnake}, {"BLOCKS", "LINE CLEAR", IC_BLOCKS, &appBlocks},
@@ -601,7 +601,7 @@ void setup() {
                                {"TIC TAC TOE", "CPU / 2P", IC_TTT, &appTtt}, {"BUBBLES", "POP POP", IC_BUBBLES, &appBubbles},
                                {"ORACLE", "DICE COIN ASK", IC_ORACLE, &appOracle}}, accGreen);
   for (App* a : {appSudoku, appWords, appPet, appDoodle, appTtt, appBubbles, appOracle}) a->parent = appFun;
-  for (App* a : {appCalc, appGraph, appResistor, appElec, appTimer, appWifi, appFlash, appMorse}) a->parent = appTools;
+  for (App* a : {appCalc, appGraph, appResistor, appElec, appTimer, appFlash, appMorse}) a->parent = appTools;
   for (App* a : {appSnake, app2048, appBlocks, appBreakout, appFlappy, appTyping, appRhythm, appStarfall, appMines, appDuel, appEcho, appRunner,
                  appMaze, appFour, appTanks, appRocks, appHopper})
     a->parent = appGames;
@@ -669,7 +669,7 @@ void loop() {
     if (cfg.click && !cur->wantsAllKeys() && !e.rep) Audio::blip(1400, 8, Audio::W_SQUARE, 0.12f);
     bool handled = false;
     try { handled = cur->key(e); }
-    catch (std::bad_alloc&) { toast("OUT OF MEMORY", 2500); handled = true; }
+    catch (std::bad_alloc&) { char b[40]; snprintf(b, sizeof(b), "OUT OF MEMORY (%uK)", (unsigned)(ESP.getMaxAllocHeap() / 1024)); toast(b, 2500); memLog("oom-key"); handled = true; }
     if (!handled && e.code == K_ESC) goBack();
   }
   if (g0) goHome();
@@ -682,10 +682,10 @@ void loop() {
   try { cur->tick(); } catch (std::bad_alloc&) { toast("OUT OF MEMORY", 2500); }
 
   uint32_t idle = millis() - lastInput;
-  bool busy = (Music::active() && !Music::paused()) || Looper::playing || Looper::counting || cur == appWifi || cur == appFlash;
+  bool busy = (Music::active() && !Music::paused()) || Looper::playing || Looper::counting || cur == appFlash;
   if (cfg.sleepMin && !busy && idle > cfg.sleepMin * 60000UL) deepSleep();
   if (!Batt::usb && Batt::pct >= 0 && Batt::mv > 2500 && Batt::mv < 3320 && millis() > 30000) deepSleep();  // protect the battery
-  if (!saver && !screenOff && cfg.dimSec && idle > cfg.dimSec * 1000UL && cur != appGuitar && cur != appWifi && cur != appFlash) {
+  if (!saver && !screenOff && cfg.dimSec && idle > cfg.dimSec * 1000UL && cur != appGuitar && cur != appFlash) {
     saver = true;
     M5Cardputer.Display.setBrightness(std::max(10, cfg.bright / 4));
   }
@@ -709,3 +709,6 @@ void loop() {
   uint32_t dt = millis() - t0;
   if (dt < frame) delay(frame - dt);
 }
+
+String clockString() { return String(); }  // WiFi clock removed (RAM); kept for the status bar API
+App* appWifi = nullptr;

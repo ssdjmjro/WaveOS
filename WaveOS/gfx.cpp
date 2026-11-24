@@ -4,8 +4,6 @@
 #include <Preferences.h>
 
 Theme T;
-static M5Canvas bgs(&M5Cardputer.Display);
-static bool bgReady = false;
 
 static uint16_t hexc(const String& h) {
   long v = strtol(h.c_str(), nullptr, 16);
@@ -101,35 +99,35 @@ void glowFrame(int x, int y, int w, int h, uint16_t c) {
 
 // ------------------------------------------------------------------ background (dithered vignette + stars)
 static const uint8_t BAYER[4][4] = {{0, 8, 2, 10}, {12, 4, 14, 6}, {3, 11, 1, 9}, {15, 7, 13, 5}};
-static void palC(int i, uint16_t c) { bgs.setPaletteColor(i, ((c >> 11) & 31) * 255 / 31, ((c >> 5) & 63) * 255 / 63, (c & 31) * 255 / 31); }
-void rebuildBackground() {
-  if (!bgReady) {  // 2-bit palette sprite: 8KB instead of 64KB
-    bgs.setColorDepth(2);
-    bgReady = bgs.createSprite(240, 135) != nullptr;
-    if (!bgReady) return;
-    bgs.createPalette();
-  }
-  palC(0, T.bg0); palC(1, T.bg1); palC(2, T.bg2); palC(3, lerpc(T.dim, T.grey, 0.5f));
-  for (int y = 0; y < 135; y++)
-    for (int x = 0; x < 240; x++) {
-      float dx = (x - 144) / 240.f, dy = (y - 74) / 135.f;
-      float t = std::max(0.f, 1 - sqrtf(dx * dx + dy * dy) * 1.6f) * 2.2f;
-      int l = (int)t;
-      float fr = t - l;
-      int idx = std::min(l + (fr * 16 > BAYER[y & 3][x & 3] ? 1 : 0), 2);
-      bgs.drawPixel(x, y, idx);
+void rebuildBackground() {}  // background is drawn directly now (saves an 8KB sprite)
+void background(bool plain) {
+  cv.fillSprite(T.bg0);
+  if (plain) return;
+  // soft radial glow: two dithered ellipses (pixel-art style) + a fixed star field
+  static const uint8_t BY[4][4] = {{0, 8, 2, 10}, {12, 4, 14, 6}, {3, 11, 1, 9}, {15, 7, 13, 5}};
+  for (int y = 14; y < 134; y++) {
+    float dy = (y - 74) / 135.f;
+    for (int lvl = 1; lvl <= 2; lvl++) {
+      float r = lvl == 1 ? 0.5f : 0.32f;  // radius (fraction of width)
+      float k = r * r - dy * dy * 1.0f;
+      if (k <= 0) continue;
+      int half = (int)(sqrtf(k) * 240);
+      int x0 = std::max(0, 144 - half), x1 = std::min(239, 144 + half);
+      uint16_t c = lvl == 1 ? T.bg1 : T.bg2;
+      // dithered edge 6px wide on both sides, solid in the middle
+      for (int x = x0; x < std::min(x0 + 6, x1); x++) if (BY[y & 3][x & 3] < (x - x0) * 3) cv.drawPixel(x, y, c);
+      if (x1 - 6 > x0 + 6) cv.drawFastHLine(x0 + 6, y, (x1 - 6) - (x0 + 6), c);
+      for (int x = std::max(x1 - 6, x0 + 6); x <= x1; x++) if (BY[y & 3][x & 3] < (x1 - x) * 3) cv.drawPixel(x, y, c);
     }
+  }
   uint32_t r = 7;
+  uint16_t sc = lerpc(T.dim, T.grey, 0.5f);
   for (int i = 0; i < 55; i++) {
     r = r * 1103515245 + 12345; int x = (r >> 8) % 240;
     r = r * 1103515245 + 12345; int y = (r >> 8) % 135;
     r = r * 1103515245 + 12345;
-    bgs.drawPixel(x, y, 3);
+    cv.drawPixel(x, y, sc);
   }
-}
-void background(bool plain) {
-  if (plain || !bgReady) cv.fillSprite(T.bg0);
-  else bgs.pushSprite(&cv, 0, 0);
 }
 
 void drawWave(int x0, int x1, int cy, float amp, float phase, bool glow, float reveal) {
