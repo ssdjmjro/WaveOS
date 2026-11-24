@@ -291,6 +291,7 @@ void stop() {
   for (int c = 0; c < 16; c++) allOff(10 + c);
 }
 void play() { if (!ev) return; idx = 0; pos = 0; memset(prog, 0, sizeof(prog)); playing = true; }
+void unload() { if (playing) return; if (ev) { free(ev); ev = nullptr; } nev = 0; }
 float posSec() { return pos / (float)SR; }
 float lenSec() { return lenS / (float)SR; }
 uint32_t events() { return nev; }

@@ -99,6 +99,8 @@ void applyRotation() {
 }
 
 void memLog(const char* where) {
+  Serial.printf("[mem] %s free=%u maxblock=%u minfree=%u app=%s\n", where, (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap(),
+                (unsigned)ESP.getMinFreeHeap(), cur ? cur->name : "-");
   if (!sdOK) return;
   File f = SD.open("/waveos/mem.txt", FILE_APPEND);
   if (f) { f.printf("%s v%s free=%u maxblock=%u minfree=%u\n", where, FW_VER, (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap(), (unsigned)ESP.getMinFreeHeap()); f.close(); }
@@ -676,6 +678,12 @@ void loop() {
   musicTick();
   settingsAutosave();
   timerTick();
+  static uint32_t memT = 0;
+  if (millis() - memT > 5000) {  // heartbeat over USB serial (for debugging memory)
+    memT = millis();
+    Serial.printf("[mem] tick free=%u maxblock=%u minfree=%u app=%s music=%d\n", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap(),
+                  (unsigned)ESP.getMinFreeHeap(), cur->name, Music::active() && !Music::paused());
+  }
   lowBatteryTick();
   irTick();
   midiTick();

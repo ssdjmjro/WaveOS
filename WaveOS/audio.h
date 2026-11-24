@@ -122,6 +122,7 @@ extern volatile bool playing;
 bool load(const char* path);
 void play();
 void stop();
+void unload();  // free the loaded file (if not playing)
 float posSec();
 float lenSec();
 uint32_t events();

@@ -32,7 +32,11 @@ struct NotesApp : App {
     std::sort(files.begin(), files.end());
   }
   void enter() override { if (mode == LIST) scan(); }
-  void leave() override { if (mode == EDIT) save(); }
+  void leave() override {  // save and give the memory back (a note can be up to 16KB)
+    if (mode == EDIT) save();
+    buf = String(); lines.clear(); lines.shrink_to_fit(); files.clear(); files.shrink_to_fit();
+    mode = LIST;
+  }
   uint32_t lastAuto = 0;
   void tick() override {  // autosave while typing (power-off safe)
     if (mode == EDIT && modified && millis() - lastAuto > 30000) { lastAuto = millis(); File f = SD.open(path, FILE_WRITE); if (f) { f.print(buf); f.close(); modified = false; } }

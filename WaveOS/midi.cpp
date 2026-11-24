@@ -205,6 +205,8 @@ struct MidiApp : App {
   void enter() override { Audio::useDelay(); ensureDir("/midi"); scan(); }
   String fullPath(int i) { return files[i].startsWith("../") ? "/" + files[i].substring(3) : "/midi/" + files[i]; }
   void leave() override {
+    MidiPlay::unload();  // give back up to ~48KB unless a song keeps playing
+    files.clear(); files.shrink_to_fit();
     for (auto& h : held) for (auto n : h.notes) { midiOut(0x80 | (cfg.midiCh - 1), n, 0); Audio::noteOff(n, 0); }
     held.clear();
   }

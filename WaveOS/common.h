@@ -7,7 +7,7 @@
 #include <initializer_list>
 
 #define FW_NAME "WAVE OS"
-#define FW_VER  "1.16"
+#define FW_VER  "1.17"
 
 // ---------------------------------------------------------------- theme
 struct Theme {

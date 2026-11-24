@@ -294,7 +294,10 @@ struct IRApp : App {
     if (!txReady) { IrSender.begin(IR_TX); txReady = true; loadLearned(); }
     loadMacros();
   }
-  void leave() override { if (learning) { learning = false; IrReceiver.stop(); } }
+  void leave() override {
+    if (learning) { learning = false; IrReceiver.stop(); }
+    irSigs.clear(); irSigs.shrink_to_fit(); irFiles.clear(); irFiles.shrink_to_fit(); fileLevel = 0;
+  }
   void send(int b) {
     if (brand == NBR && !learned[b].set) { toast("NOT LEARNED - PRESS L"); return; }
     sendCode(brand, b);
