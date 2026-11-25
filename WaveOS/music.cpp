@@ -251,6 +251,7 @@ int playCount(const String& p) { return countOfHash(fnv(p.c_str())); }
 uint32_t bookmark(const String& p) { uint32_t h = fnv(p.c_str()); for (auto& b : bms) if (b.h == h) return b.pos; return 0; }
 void setBookmark(const String& p, uint32_t pos) {
   uint32_t h = fnv(p.c_str());
+  dirty = true; dirtyT = millis();
   for (auto& b : bms) if (b.h == h) { b.pos = pos; return; }
   bms.push_back({h, pos});
   if (bms.size() > 40) bms.erase(bms.begin());
@@ -261,6 +262,8 @@ void setBookmark(const String& p, uint32_t pos) {
 namespace Meta {
 String title, artist, album;
 bool hasArt = false;
+static bool wantArt = false;   // APIC frames are only decoded in the deferred pass
+static String pending;         // song whose art + lyrics still have to be loaded
 uint16_t art[28 * 28];
 struct Lyr { float t; String s; };
 std::vector<Lyr> lyrics;
@@ -364,7 +367,7 @@ static void readID3(const String& path) {
       f.read(b, fs);
       String s = clean(b + 1, fs - 1, b[0]);
       if (isT) title = s; else if (isA) artist = s; else album = s;
-    } else if ((!strcmp(id, "APIC") || !strcmp(id, "PIC")) && !hasArt && fs < 24000 && fs + 30000 < ESP.getMaxAllocHeap() && ESP.getFreeHeap() > 60000) {
+    } else if (wantArt && (!strcmp(id, "APIC") || !strcmp(id, "PIC")) && !hasArt && fs < 24000 && fs + 30000 < ESP.getMaxAllocHeap() && ESP.getFreeHeap() > 60000) {
       uint8_t* b = (uint8_t*)malloc(fs);
       if (b) {
         f.read(b, fs);
@@ -403,16 +406,37 @@ static void loadLyrics(const String& path) {
   f.close();
   std::sort(lyrics.begin(), lyrics.end(), [](const Lyr& a, const Lyr& b) { return a.t < b.t; });
 }
+// fast part: title / artist only, so the new song shows up immediately
 void load(const String& path) {
   title = baseName(path); artist = parentName(path); album = "";
   hasArt = false;
+  lyrics.clear();
   String l = path; l.toLowerCase();
+  wantArt = false;
   if (l.endsWith(".mp3") || l.endsWith(".aac")) readID3(path);
   if (!title.length()) title = baseName(path);
+  pending = path;
+}
+// slow part (album art + lyrics), run a moment later from musicTick()
+void finish() {
+  if (!pending.length()) return;
+  String path = pending;
+  pending = "";
+  String l = path; l.toLowerCase();
+  wantArt = true;
+  if (l.endsWith(".mp3") || l.endsWith(".aac")) { String t = title, a = artist, b = album; readID3(path); title = t; artist = a; album = b; }
+  wantArt = false;
   if (!hasArt) {
+    // remember per folder which cover file exists (or that none does): no 5x SD lookups per song
+    static String lastDir, lastCover;
+    static bool lastKnown = false;
     String dir = path.substring(0, path.lastIndexOf('/') + 1);
-    const char* names[] = {"cover.jpg", "folder.jpg", "Cover.jpg", "Folder.jpg", "front.jpg"};
-    for (auto n : names) if (SD.exists(dir + n)) { artFromFile(dir + n); if (hasArt) break; }
+    if (!lastKnown || dir != lastDir) {
+      lastDir = dir; lastCover = ""; lastKnown = true;
+      const char* names[] = {"cover.jpg", "folder.jpg", "Cover.jpg", "Folder.jpg", "front.jpg"};
+      for (auto n : names) if (SD.exists(dir + n)) { lastCover = dir + n; break; }
+    }
+    if (lastCover.length()) artFromFile(lastCover);
   }
   loadLyrics(path);
 }
@@ -520,9 +544,25 @@ void loadState() {
 }
 }  // namespace Ctl
 
-void libEnsureScanned() {
-  if (Lib::scanned) return;
+// The folder scan (the slow part, ~1s for 400 songs) runs in a background task during the boot
+// animation, so opening MUSIC is instant. SD access is safe from two tasks (FATFS is reentrant).
+static volatile int scanTask = 0;  // 0 not started, 1 running, 2 done
+static void scanTaskFn(void*) {
   Lib::scan(); Lib::loadFavs(); Stats::load();
+  scanTask = 2;
+  vTaskDelete(nullptr);
+}
+void libScanStart() {
+  if (scanTask || !sdOK) return;
+  scanTask = 1;
+  if (xTaskCreatePinnedToCore(scanTaskFn, "libscan", 8192, nullptr, 1, nullptr, 0) != pdPASS) scanTask = 0;
+}
+void libEnsureScanned() {
+  static bool ready = false;
+  if (ready) return;
+  if (scanTask == 1) while (scanTask != 2) delay(5);  // still scanning: wait for it
+  else if (scanTask == 0) { Lib::scan(); Lib::loadFavs(); Stats::load(); }
+  ready = true;
   memLog("scan");
   Ctl::setSource({}, "ALL SONGS");
   Ctl::loadState();
@@ -542,6 +582,8 @@ static uint32_t shakeT = 0;
 static int shakeN = 0;
 void musicTick() {
   if (Music::takeEnded()) Ctl::next(false);
+  static uint32_t metaT = 0;
+  if (Meta::pending.length()) { if (!metaT) metaT = millis(); else if (millis() - metaT > 150) { metaT = 0; Meta::finish(); } }
   if (Stats::dirty && millis() - Stats::dirtyT > 20000) { Stats::dirty = false; Stats::save(); }
   Music::abTick();
   if (Ctl::sleepAt) {
@@ -737,7 +779,7 @@ struct MusicApp : App {
     if (view == V_CTX) { build(); return; }
     setView((Music::active() || Lib::files.empty()) ? V_PLAYING : V_SONGS);
   }
-  void leave() override { Ctl::rememberBookmark(); Stats::save(); }
+  void leave() override { Ctl::rememberBookmark(); if (Stats::dirty) { Stats::dirty = false; Stats::save(); } }
   void playFrom(int song, bool shuffle) {
     std::vector<int> src = songsOfRows();
     const char* nm = view == V_SONGS ? "ALL SONGS" : view == V_FAVS ? "FAVOURITES" : view == V_QUEUE ? "QUEUE" : ctxName.c_str();

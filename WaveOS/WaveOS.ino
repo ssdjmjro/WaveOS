@@ -441,6 +441,7 @@ static void drawBootFrame(float t) {
     textC(120, 119, "CARDPUTER ADV  V" FW_VER, lerpc(BG, RGB(110, 124, 150), a), 1, false);
   }
 }
+void libScanStart();
 static void bootAnim() {
   const uint8_t chime[4] = {72, 76, 79, 84};
   uint32_t t0 = millis();
@@ -620,6 +621,7 @@ void setup() {
                  appMaze, appFour, appTanks, appRocks, appHopper})
     a->parent = appGames;
 
+  libScanStart();  // music library scan runs in the background during the boot animation
   bootAnim();
   if (!sdOK) toast("NO SD CARD", 2500);
   {  // tell the user (and the SD card) why we rebooted last time
