@@ -5,6 +5,19 @@
 
 using namespace Audio;
 
+// keys are labelled relative to the chosen key: A = 1, W = 2b, S = 2, E = 3b ... (movable "1")
+static const char* DEGL[12] = {"1", "2b", "2", "3b", "3", "4", "5b", "5", "6b", "6", "7b", "7"};
+static const char* KEYN[12] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
+struct ChordT { const char* n; uint8_t len; int8_t iv[5]; };
+static const ChordT CHT[] = {
+    {"", 1, {0}},               {"MAJ", 3, {0, 4, 7}},       {"MIN", 3, {0, 3, 7}},        {"7", 4, {0, 4, 7, 10}},
+    {"MAJ7", 4, {0, 4, 7, 11}}, {"MIN7", 4, {0, 3, 7, 10}},  {"SUS2", 3, {0, 2, 7}},       {"SUS4", 3, {0, 5, 7}},
+    {"7SUS4", 4, {0, 5, 7, 10}}, {"AUG", 3, {0, 4, 8}},      {"DIM", 3, {0, 3, 6}},        {"DIM7", 4, {0, 3, 6, 9}},
+    {"M7B5", 4, {0, 3, 6, 10}}, {"MMAJ7", 4, {0, 3, 7, 11}}, {"6", 4, {0, 4, 7, 9}},       {"MIN6", 4, {0, 3, 7, 9}},
+    {"ADD9", 4, {0, 4, 7, 14}}, {"9", 5, {0, 4, 7, 10, 14}}, {"MAJ9", 5, {0, 4, 7, 11, 14}}, {"MIN9", 5, {0, 3, 7, 10, 14}},
+    {"PWR", 3, {0, 7, 12}}};
+static constexpr int NCH = sizeof(CHT) / sizeof(CHT[0]);
+
 struct SynthApp : App {
   // white keys: a s d f g h j k l ; '   black keys: w e t y u o p
   static int semitone(char c) {
@@ -18,13 +31,13 @@ struct SynthApp : App {
   }
   struct Held { char c; std::vector<uint8_t> notes; };
   std::vector<Held> held;
-  std::vector<uint8_t> sustained;  // notes kept by HOLD
+  std::vector<uint8_t> sustained;  // notes kept by HOLD (latched until the next chord)
+  uint8_t ref[128] = {0};          // how many keys / holds want each note (chords can share notes)
   int octave = 4;
-  int transpose = 0;   // semitones
-  int chord = 0;       // 0 off, 1 maj, 2 min, 3 7th, 4 power, 5 sus4
+  int transpose = 0;   // the key: 0 = C ... 11 = B  (A is always "1")
+  int chord = 0;       // index into CHT, 0 = single notes
   int layer = 0;       // 0 off, 1 +oct, 2 -oct, 3 +5th, 4 +/-oct
   bool hold = false;
-  const char* CHORD[6] = {"", "MAJ", "MIN", "7TH", "PWR", "SUS4"};
   const char* LAYER[5] = {"", "+OCT", "-OCT", "+5TH", "2OCT"};
   const char* ARP[5] = {"", "UP", "DOWN", "UPDN", "RND"};
   int track = 0;
@@ -40,22 +53,32 @@ struct SynthApp : App {
   SynthApp() { name = "SYNTH"; }
   void enter() override { Audio::useDelay(); }
   bool wantsAllKeys() override { return true; }
+  // reference counted: letting go of one chord never cuts a note another held chord still uses
+  void soundOn(uint8_t n) {
+    if (ref[n]++) return;
+    if (arpMode) arpNote(n, true, Looper::tr[track].wave);
+    else noteOn(n, Looper::tr[track].wave, 0);
+    Looper::recNote(n, true);
+  }
   void releaseNote(uint8_t n) {
+    if (!ref[n] || --ref[n]) return;
     if (arpMode) arpNote(n, false, 0); else noteOff(n, 0);
     Looper::recNote(n, false);
   }
+  void releaseHeld() { for (auto n : sustained) releaseNote(n); sustained.clear(); }
   void releaseAll() {
     for (auto& h : held) for (auto n : h.notes) releaseNote(n);
-    for (auto n : sustained) releaseNote(n);
-    held.clear(); sustained.clear();
+    held.clear();
+    releaseHeld();
+    for (int n = 0; n < 128; n++) if (ref[n]) { ref[n] = 1; releaseNote(n); }
+    allOff(0); arpClear();
   }
   void leave() override { releaseAll(); }
   std::vector<uint8_t> notesFor(int base) {
-    static const int8_t CH[6][4] = {{0, -1, -1, -1}, {0, 4, 7, -1}, {0, 3, 7, -1}, {0, 4, 7, 10}, {0, 7, 12, -1}, {0, 5, 7, -1}};
     std::vector<uint8_t> v;
     auto add = [&](int n) { if (n >= 0 && n < 128 && std::find(v.begin(), v.end(), n) == v.end()) v.push_back(n); };
-    for (int i = 0; i < 4 && CH[chord][i] >= 0; i++) {
-      int n = base + CH[chord][i];
+    for (int i = 0; i < CHT[chord].len; i++) {
+      int n = base + CHT[chord].iv[i];
       add(n);
       if (layer == 1 || layer == 4) add(n + 12);
       if (layer == 2 || layer == 4) add(n - 12);
@@ -91,15 +114,17 @@ struct SynthApp : App {
     switch (c) {
       case 'z': octave = std::max(0, octave - 1); snprintf(b, sizeof(b), "OCTAVE %d", octave); toast(b, 600); return true;
       case 'x': octave = std::min(8, octave + 1); snprintf(b, sizeof(b), "OCTAVE %d", octave); toast(b, 600); return true;
-      case ',': case '<': transpose = std::max(-12, transpose - 1); snprintf(b, sizeof(b), "TRANSPOSE %+d", transpose); toast(b, 600); return true;
-      case '/': transpose = std::min(12, transpose + 1); snprintf(b, sizeof(b), "TRANSPOSE %+d", transpose); toast(b, 600); return true;
-      case '5': chord = (chord + 1) % 6; toast(chord ? (String("CHORD ") + CHORD[chord]).c_str() : "CHORD OFF", 700); return true;
+      case ',': case '<': releaseAll(); transpose = (transpose + 11) % 12; snprintf(b, sizeof(b), "KEY %s  (A = 1 = %s)", KEYN[transpose], KEYN[transpose]); toast(b, 800); return true;
+      case '/': case '?': releaseAll(); transpose = (transpose + 1) % 12; snprintf(b, sizeof(b), "KEY %s  (A = 1 = %s)", KEYN[transpose], KEYN[transpose]); toast(b, 800); return true;
+      case '5': case '%':
+        chord = (chord + (c == '%' ? NCH - 1 : 1)) % NCH;
+        toast(chord ? (String("CHORD ") + CHT[chord].n).c_str() : "CHORD OFF", 700); return true;
       case '6': releaseAll(); arpMode = (arpMode + 1) % 5; arpClear(); toast(arpMode ? (String("ARP ") + ARP[arpMode]).c_str() : "ARP OFF", 700); return true;
       case '7': arpOct = arpOct % 3 + 1; snprintf(b, sizeof(b), "ARP RANGE %d OCT", (int)arpOct); toast(b, 700); return true;
-      case '8': layer = (layer + 1) % 5; toast(layer ? (String("LAYER ") + LAYER[layer]).c_str() : "LAYER OFF", 700); return true;
+      case '8': releaseAll(); layer = (layer + 1) % 5; toast(layer ? (String("LAYER ") + LAYER[layer]).c_str() : "LAYER OFF", 700); return true;
       case '9':
         hold = !hold;
-        if (!hold) { for (auto n : sustained) releaseNote(n); sustained.clear(); }
+        if (!hold) releaseHeld();
         toast(hold ? "HOLD ON" : "HOLD OFF", 700); return true;
       case 'c': Looper::tr[track].wave = (Looper::tr[track].wave + 1) % W_COUNT; return true;
       case '[': param = (param + NP - 1) % NP; return true;
@@ -120,7 +145,7 @@ struct SynthApp : App {
         else toast("CLEAR LOOPS TO CHANGE BARS");
         return true;
       case '0': Looper::metro = !Looper::metro; toast(Looper::metro ? "METRONOME ON" : "METRONOME OFF"); return true;
-      case '\\': case '?': help = true; return true;
+      case '\\': case '|': help = true; return true;
     }
     return false;
   }
@@ -129,29 +154,23 @@ struct SynthApp : App {
     // note on/off from the held key list (polyphonic)
     std::vector<char> now;
     if (!heldFn)
-      for (char k : heldKeys) if (semitone(k) >= 0) now.push_back(k);
+      for (char k : heldKeys) if (semitone(k) >= 0 && std::find(now.begin(), now.end(), k) == now.end()) now.push_back(k);
     for (int i = held.size() - 1; i >= 0; i--) {
-      if (std::find(now.begin(), now.end(), held[i].c) == now.end()) {
-        for (auto n : held[i].notes) {
-          if (hold) { if (std::find(sustained.begin(), sustained.end(), n) == sustained.end()) sustained.push_back(n); }
-          else releaseNote(n);
-        }
-        held.erase(held.begin() + i);
+      if (std::find(now.begin(), now.end(), held[i].c) != now.end()) continue;
+      for (auto n : held[i].notes) {
+        if (hold) { soundOn(n); sustained.push_back(n); }  // HOLD keeps it ringing
+        releaseNote(n);
       }
+      held.erase(held.begin() + i);
     }
     for (char k : now) {
       bool was = false;
       for (auto& h : held) if (h.c == k) was = true;
       if (was) continue;
+      if (hold && held.empty()) releaseHeld();  // the next chord replaces the held one
       int base = 12 * (octave + 1) + semitone(k) + transpose;
       Held h{k, notesFor(base)};
-      for (auto n : h.notes) {
-        auto it = std::find(sustained.begin(), sustained.end(), n);
-        if (it != sustained.end()) { sustained.erase(it); releaseNote(n); }
-        if (arpMode) arpNote(n, true, Looper::tr[track].wave);
-        else noteOn(n, Looper::tr[track].wave, 0);
-        Looper::recNote(n, true);
-      }
+      for (auto n : h.notes) soundOn(n);
       held.push_back(h);
     }
   }
@@ -188,11 +207,11 @@ struct SynthApp : App {
     }
     {  // performance modes overlay (scope panel)
       char m1[24], m2[24];
-      snprintf(m1, sizeof(m1), "%s%s%s", chord ? CHORD[chord] : "", chord && layer ? " " : "", layer ? LAYER[layer] : "");
+      snprintf(m1, sizeof(m1), "%s%s%s", chord ? CHT[chord].n : "", chord && layer ? " " : "", layer ? LAYER[layer] : "");
       snprintf(m2, sizeof(m2), "%s%s%s", arpMode ? "ARP " : "", arpMode ? ARP[arpMode] : "", hold ? " HOLD" : "");
       if (*m1) text(6, 34, m1, T.yel, 1, false);
       if (*m2) text(6, 43, m2, T.green, 1, false);
-      if (transpose) { char t[8]; snprintf(t, sizeof(t), "%+d", transpose); text(56, 17, t, T.cyan, 1, false); }
+      { char t[12]; snprintf(t, sizeof(t), "KEY %s", KEYN[transpose]); text(74 - textW(t), 17, t, T.cyan, 1, false); }
     }
     // --- info
     panel(80, 14, 78, 38, T.purpD);
@@ -266,28 +285,32 @@ struct SynthApp : App {
     static const char bk[11] = {'w', 'e', 0, 't', 'y', 'u', 0, 'o', 'p', 0, 0};
     int kx = 3, kw = 21, ky = 102;
     for (int i = 0; i < 11; i++) {
-      uint8_t n = 12 * (octave + 1) + semitone(wk[i]);
-      bool on = voiceActive(n);
+      uint8_t n = 12 * (octave + 1) + semitone(wk[i]) + transpose;
+      bool on = ref[n] > 0 || voiceActive(n);
       uint16_t c = on ? lerpc(T.white, T.cyan, 0.6f) : RGB(200, 210, 230);
       if (cfg.mono) c = on ? T.grey : T.white;
       cv.fillRect(kx + i * kw, ky, kw - 1, 22, c);
       cv.fillRect(kx + i * kw, ky + 20, kw - 1, 2, T.grey);
-      char l[2] = {(char)toupper(wk[i]), 0};
-      text(kx + i * kw + 8, ky + 12, l, on ? T.bg0 : T.grey, 1, false);
+      const char* dl = DEGL[semitone(wk[i]) % 12];
+      text(kx + i * kw + (kw - 1 - textW(dl)) / 2, ky + 12, dl, on ? T.bg0 : (semitone(wk[i]) % 12 == 0 ? T.cyan : T.grey), 1, false);
     }
     for (int i = 0; i < 11; i++) {
       if (!bk[i]) continue;
-      uint8_t n = 12 * (octave + 1) + semitone(bk[i]);
-      bool on = voiceActive(n);
+      uint8_t n = 12 * (octave + 1) + semitone(bk[i]) + transpose;
+      bool on = ref[n] > 0 || voiceActive(n);
       int x = kx + i * kw + 14;
       cv.fillRect(x, ky, 12, 12, on ? T.purp : RGB(14, 18, 30));
-      char l[2] = {(char)toupper(bk[i]), 0};
-      text(x + 3, ky + 3, l, on ? T.white : T.dim, 1, false);
+      text(x + 1, ky + 3, DEGL[semitone(bk[i]) % 12], on ? T.white : T.grey, 1, false);
     }
-    hintBar({{"ZX", "OCT"}, {"5-9", "FX"}, {"R", "REC"}, {"SPC", "LOOP"}, {"\\", "HELP"}});
+    {  // live function keys: what each number key is set to right now
+      static char c5[10], c6[10];
+      snprintf(c5, sizeof(c5), "%s", chord ? CHT[chord].n : "CHORD");
+      snprintf(c6, sizeof(c6), "%s", arpMode ? ARP[arpMode] : "ARP");
+      hintBar({{"5", c5}, {"6", c6}, {"8", layer ? LAYER[layer] : "LAYER"}, {"9", hold ? "HOLD!" : "HOLD"}, {"R", "REC"}, {"\\", "?"}});
+    }
     if (help)
-      helpOverlay("SYNTH + LOOPER", {"A-'  WHITE KEYS", "W-P  BLACK KEYS", "Z X  OCTAVE", "C  WAVEFORM", "TAB  NEXT PARAM", "[ ]  PARAM", "- =  ADJUST",
-                                     "5  CHORD MODE", "6  ARPEGGIATOR", "7  ARP RANGE", "8  OCTAVE LAYER", "9  HOLD", ", /  TRANSPOSE", "0  METRONOME", "R  REC/OVERDUB", "SPC  PLAY/STOP", "1-4  TRACK", "M  MUTE TRACK", "Q  QUANTIZE", "B N  BPM", "V  BARS",
+      helpOverlay("SYNTH + LOOPER", {"A-'  1 2 3 4 5 6 7 1 2 3 4", "W-P  2b 3b 5b 6b 7b 2b 3b", "Z X  OCTAVE", "C  WAVEFORM", "TAB  NEXT PARAM", "[ ]  PARAM", "- =  ADJUST",
+                                     "5  CHORD TYPE (SHIFT=BACK)", "6  ARPEGGIATOR", "7  ARP RANGE", "8  OCTAVE LAYER", "9  HOLD", ", /  KEY (WHICH NOTE IS 1)", "0  METRONOME", "R  REC/OVERDUB", "SPC  PLAY/STOP", "1-4  TRACK", "M  MUTE TRACK", "Q  QUANTIZE", "B N  BPM", "V  BARS",
                                      "DEL  UNDO TAKE", "FN+DEL  CLEAR", "FN+S  SAVE", "FN+L  LOAD", "FN+E  EXPORT MID"});
   }
 };

@@ -149,7 +149,7 @@ struct FourApp : App {
   bool full() { for (int c = 0; c < 7; c++) if (!b[0][c]) return false; return true; }
   bool key(const KeyEv& e) override {
     if (state >= 2) { if (e.code == K_ENTER) { reset(); return true; } return e.code != K_ESC; }
-    if (state != 0) return true;
+    if (state != 0) return e.code != K_ESC;
     KeyCode k = dir4(e);
     if (k == K_LEFT) { col = (col + 6) % 7; return true; }
     if (k == K_RIGHT) { col = (col + 1) % 7; return true; }
@@ -227,7 +227,7 @@ struct TanksApp : App {
   }
   bool key(const KeyEv& e) override {
     if (over) { if (e.code == K_ENTER) { reset(); return true; } return e.code != K_ESC; }
-    if (flying || turn != 0) return true;
+    if (flying || turn != 0) return e.code != K_ESC;
     KeyCode k = dir4(e);
     if (k == K_UP) { ang[0] = std::min(170.f, ang[0] + (e.rep ? 3 : 1)); return true; }
     if (k == K_DOWN) { ang[0] = std::max(5.f, ang[0] - (e.rep ? 3 : 1)); return true; }

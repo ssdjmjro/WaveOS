@@ -142,7 +142,7 @@ struct DrumsApp : App {
       (void)c;
     }
     snprintf(b, sizeof(b), "SW%d %s", Drums::swing, preset >= 0 ? presets[preset].n : "");
-    text(150, 2, b, T.dim, 1, false);
+    textFit(128, 2, b, T.dim, 36, false);  // keep clear of the volume / battery icons
     hintBar({{"OK", "STEP"}, {"SPC", "PLAY"}, {"P", "PRESET"}, {"1-4", "PATTERN"}, {"\\", "HELP"}});
     if (help)
       helpOverlay("DRUM MACHINE", {"ARROWS  MOVE", "OK  TOGGLE STEP", "SPC  PLAY/STOP", "1-4  PATTERN", "P  PRESET BEAT", "R  RANDOM ROW", "DEL  CLEAR ROW",

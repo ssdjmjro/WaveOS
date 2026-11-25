@@ -138,7 +138,7 @@ struct SnakeApp : App {
     text(sx + 5, 98, "SPEED", T.grey, 1, false);
     snprintf(b, sizeof(b), "%d", (140 - stepMs) / 4 + 1);
     text(sx + 40, 98, b, T.cyan, 1, false);
-    if (!started && !over) textC(GX + CW * CS / 2, 60, "ARROWS TO START", T.white);
+    if (!started && !over) textC(GX + CW * CS / 2, 30, "ARROWS TO START", T.white);
     if (paused) textC(GX + CW * CS / 2, 60, "PAUSED", T.white, 2);
     if (over) {
       panel(20, 42, 120, 44, T.red, T.bg1);

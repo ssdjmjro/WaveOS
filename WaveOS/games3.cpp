@@ -47,7 +47,7 @@ struct StarfallApp : App {
       for (int c = 0; c < cols; c++)
         enemies.push_back({(float)(28 + c * 36), (float)(-14 - r * 20), (wave % 2 ? 0.5f : -0.5f) * (1 + wave * 0.08f), 1 + (r == 0 && wave > 2) + wave / 6, r == 0 && wave > 2});
   }
-  void die() { over = true; if (score > best) { best = score; saveScore("starfall", best); } }
+  void die() { if (over) return; over = true; if (score > best) { best = score; saveScore("starfall", best); } }
   bool key(const KeyEv& e) override {
     if (over) { if (e.code == K_ENTER) { reset(); return true; } return false; }
     return gdir3(e) != K_NONE || (e.code == K_CHAR && e.ch == ' ');
@@ -174,91 +174,164 @@ struct StarfallApp : App {
 struct MinesApp : App {
   static constexpr int GW = 16, GH = 9, CS = 12, OX = 24, OY = 14;
   uint8_t mine[GH][GW], open_[GH][GW], flag[GH][GW];
-  int cx = 8, cy = 4, mines = 20, best = 0;
+  int cx = 8, cy = 4, level = 1, best = 0, boomX = -1, boomY = -1;
   bool first = true, over = false, won = false;
   uint32_t t0 = 0, tEnd = 0;
+  static constexpr int LV_MINES[3] = {14, 22, 32};
+  int mines() const { return LV_MINES[level]; }
   MinesApp() { name = "MINES"; }
-  void reset() { memset(mine, 0, sizeof(mine)); memset(open_, 0, sizeof(open_)); memset(flag, 0, sizeof(flag)); first = true; over = won = false; }
-  void enter() override { best = loadScore("mines"); if (over || won || first) reset(); }
-  int around(int x, int y) {
+  const char* key3() const { static const char* k[3] = {"mines_e", "mines", "mines_h"}; return k[level]; }
+  void reset() {
+    memset(mine, 0, sizeof(mine)); memset(open_, 0, sizeof(open_)); memset(flag, 0, sizeof(flag));
+    first = true; over = won = false; boomX = boomY = -1;
+    best = loadScore(key3());
+  }
+  void enter() override { if (over || won || first) reset(); }
+  bool in(int x, int y) const { return x >= 0 && y >= 0 && x < GW && y < GH; }
+  int around(int x, int y) const {
     int n = 0;
-    for (int j = -1; j <= 1; j++) for (int i = -1; i <= 1; i++) { int a = x + i, b = y + j; if (a >= 0 && b >= 0 && a < GW && b < GH && mine[b][a]) n++; }
+    for (int j = -1; j <= 1; j++) for (int i = -1; i <= 1; i++) if (in(x + i, y + j) && mine[y + j][x + i]) n++;
     return n;
   }
-  void place(int sx, int sy) {
+  int flagsAround(int x, int y) const {
     int n = 0;
-    while (n < mines) {
+    for (int j = -1; j <= 1; j++) for (int i = -1; i <= 1; i++) if (in(x + i, y + j) && flag[y + j][x + i]) n++;
+    return n;
+  }
+  void place(int sx, int sy) {  // the first opened cell and its neighbours are always safe
+    int n = 0;
+    while (n < mines()) {
       int x = random(GW), y = random(GH);
       if (mine[y][x] || (abs(x - sx) <= 1 && abs(y - sy) <= 1)) continue;
       mine[y][x] = 1; n++;
     }
     t0 = millis();
   }
-  void flood(int x, int y) {
-    if (x < 0 || y < 0 || x >= GW || y >= GH || open_[y][x] || flag[y][x]) return;
-    open_[y][x] = 1;
-    if (!around(x, y)) for (int j = -1; j <= 1; j++) for (int i = -1; i <= 1; i++) if (i || j) flood(x + i, y + j);
+  void flood(int x0, int y0) {  // iterative, no deep recursion
+    uint8_t st[GW * GH][2]; int sp = 0;
+    st[sp][0] = x0; st[sp][1] = y0; sp++;
+    while (sp) {
+      sp--; int x = st[sp][0], y = st[sp][1];
+      if (!in(x, y) || open_[y][x] || flag[y][x]) continue;
+      open_[y][x] = 1;
+      if (around(x, y)) continue;
+      for (int j = -1; j <= 1; j++) for (int i = -1; i <= 1; i++)
+        if ((i || j) && in(x + i, y + j) && !open_[y + j][x + i] && sp < GW * GH) { st[sp][0] = x + i; st[sp][1] = y + j; sp++; }
+    }
+  }
+  bool openCell(int x, int y) {  // false = hit a mine
+    if (flag[y][x] || open_[y][x]) return true;
+    if (mine[y][x]) { boomX = x; boomY = y; return false; }
+    flood(x, y);
+    return true;
   }
   void reveal(int x, int y) {
-    if (flag[y][x]) return;
+    if (flag[y][x]) { Audio::blip(200, 30, Audio::W_SQUARE, 0.2f); return; }
     if (first) { place(x, y); first = false; }
-    if (open_[y][x]) {  // chord: open neighbours if flags match
-      int f = 0;
-      for (int j = -1; j <= 1; j++) for (int i = -1; i <= 1; i++) { int a = x + i, b = y + j; if (a >= 0 && b >= 0 && a < GW && b < GH && flag[b][a]) f++; }
-      if (f == around(x, y))
-        for (int j = -1; j <= 1; j++) for (int i = -1; i <= 1; i++) { int a = x + i, b = y + j; if (a >= 0 && b >= 0 && a < GW && b < GH && !open_[b][a] && !flag[b][a]) { if (mine[b][a]) { boomAll(); return; } flood(a, b); } }
-    } else {
-      if (mine[y][x]) { boomAll(); return; }
-      flood(x, y);
-    }
+    bool ok = true;
+    if (open_[y][x]) {  // open number: if its flags are all placed, open the rest around it
+      int n = around(x, y);
+      if (!n || flagsAround(x, y) != n) { Audio::blip(260, 25, Audio::W_SQUARE, 0.15f); return; }
+      for (int j = -1; j <= 1 && ok; j++) for (int i = -1; i <= 1 && ok; i++) if (in(x + i, y + j)) ok = openCell(x + i, y + j);
+    } else ok = openCell(x, y);
+    if (!ok) { boomAll(); return; }
     Audio::blip(900, 20, Audio::W_TRI, 0.3f);
     int closed = 0;
     for (int j = 0; j < GH; j++) for (int i = 0; i < GW; i++) if (!open_[j][i]) closed++;
-    if (closed == mines) {
+    if (closed == mines()) {
       won = true; tEnd = millis();
-      int sec = (tEnd - t0) / 1000;
-      if (!best || sec < best) { best = sec; saveScore("mines", best); }
+      for (int j = 0; j < GH; j++) for (int i = 0; i < GW; i++) if (mine[j][i]) flag[j][i] = 1;
+      int sec = std::max(1, (int)((tEnd - t0) / 1000));
+      if (!best || sec < best) { best = sec; saveScore(key3(), best); }
       Audio::blip(1320, 200, Audio::W_SQUARE, 0.4f);
     }
   }
-  void boomAll() { over = true; tEnd = millis(); for (int j = 0; j < GH; j++) for (int i = 0; i < GW; i++) if (mine[j][i]) open_[j][i] = 1; Audio::blip(70, 500, Audio::W_NOISE, 0.6f); }
+  void boomAll() { over = true; tEnd = millis(); Audio::blip(70, 500, Audio::W_NOISE, 0.6f); }
   bool key(const KeyEv& e) override {
-    if (over || won) { if (e.code == K_ENTER) { reset(); return true; } return false; }
+    if (over || won) {
+      if (e.code == K_ENTER || (e.code == K_CHAR && e.ch == ' ')) { reset(); return true; }
+      if (e.is('m')) { level = (level + 1) % 3; reset(); return true; }
+      return e.code != K_ESC;
+    }
     KeyCode k = gdir3(e);
     if (k == K_UP) { cy = (cy + GH - 1) % GH; return true; }
     if (k == K_DOWN) { cy = (cy + 1) % GH; return true; }
     if (k == K_LEFT) { cx = (cx + GW - 1) % GW; return true; }
     if (k == K_RIGHT) { cx = (cx + 1) % GW; return true; }
     if (e.code == K_ENTER || (e.code == K_CHAR && e.ch == ' ')) { reveal(cx, cy); return true; }
-    if (e.is('f')) { if (!open_[cy][cx]) flag[cy][cx] ^= 1; return true; }
-    if (e.is('m')) { mines = mines >= 35 ? 12 : mines + 8; reset(); char b[20]; snprintf(b, sizeof(b), "%d MINES", mines); toast(b); return true; }
+    if (e.is('f') || e.is('e')) {
+      if (!open_[cy][cx]) { flag[cy][cx] ^= 1; Audio::blip(flag[cy][cx] ? 1500 : 700, 20, Audio::W_SQUARE, 0.2f); }
+      return true;
+    }
+    if (e.is('m')) {
+      if (!first) { toast("FINISH OR LOSE FIRST", 900); return true; }
+      level = (level + 1) % 3; reset();
+      static const char* L[3] = {"EASY", "NORMAL", "HARD"};
+      char b[24]; snprintf(b, sizeof(b), "%s - %d MINES", L[level], mines()); toast(b);
+      return true;
+    }
     return false;
+  }
+  void tile(int px, int py, uint16_t base) {
+    cv.fillRect(px, py, CS - 1, CS - 1, base);
+    cv.drawFastHLine(px, py, CS - 1, lerpc(base, T.white, 0.35f));
+    cv.drawFastVLine(px, py, CS - 1, lerpc(base, T.white, 0.2f));
+    cv.drawFastHLine(px, py + CS - 2, CS - 1, lerpc(base, T.bg0, 0.5f));
+    cv.drawFastVLine(px + CS - 2, py, CS - 1, lerpc(base, T.bg0, 0.4f));
+  }
+  void drawMine(int px, int py, uint16_t c) {
+    int mx = px + 5, my = py + 5;
+    cv.drawFastHLine(mx - 4, my, 9, c); cv.drawFastVLine(mx, my - 4, 9, c);
+    cv.drawLine(mx - 3, my - 3, mx + 3, my + 3, c); cv.drawLine(mx - 3, my + 3, mx + 3, my - 3, c);
+    cv.fillCircle(mx, my, 3, c);
+    cv.drawPixel(mx - 1, my - 1, T.white);
+  }
+  void drawFlag(int px, int py) {
+    cv.drawFastVLine(px + 4, py + 2, 7, T.white);
+    cv.fillTriangle(px + 5, py + 2, px + 5, py + 6, px + 9, py + 4, T.red);
+    cv.drawFastHLine(px + 2, py + 9, 6, T.grey);
   }
   void draw() override {
     background(true);
-    statusBar("MINES", T.blue);
-    static const uint16_t numC[9] = {0, RGB(90, 160, 255), RGB(90, 240, 150), RGB(255, 90, 100), RGB(180, 110, 255), RGB(255, 160, 60), RGB(62, 232, 240), RGB(255, 255, 255), RGB(150, 150, 150)};
+    static const uint16_t numC[9] = {0, RGB(90, 160, 255), RGB(90, 220, 120), RGB(255, 90, 100), RGB(180, 110, 255),
+                                     RGB(255, 160, 60), RGB(62, 232, 240), RGB(255, 255, 255), RGB(170, 170, 170)};
     int flags = 0;
+    for (int y = 0; y < GH; y++) for (int x = 0; x < GW; x++) if (flag[y][x]) flags++;
+    uint32_t sec = first ? 0 : ((over || won) ? tEnd - t0 : millis() - t0) / 1000;
+    static const char* L[3] = {"EASY", "NORMAL", "HARD"};
+    char b[48];
+    snprintf(b, sizeof(b), "MINES  %d LEFT  %03uS", mines() - flags, (unsigned)std::min<uint32_t>(sec, 999));
+    statusBar(b, T.blue);
+    cv.fillRect(OX - 2, OY - 2, GW * CS + 3, GH * CS + 3, T.bg0);
     for (int y = 0; y < GH; y++) for (int x = 0; x < GW; x++) {
       int px = OX + x * CS, py = OY + y * CS;
-      if (flag[y][x]) flags++;
-      if (open_[y][x]) {
-        cv.fillRect(px, py, CS - 1, CS - 1, T.bg2);
-        if (mine[y][x]) { cv.fillCircle(px + 5, py + 5, 3, T.red); cv.drawPixel(px + 4, py + 4, T.white); }
-        else { int n = around(x, y); if (n) { char b[2] = {(char)('0' + n), 0}; text(px + 3, py + 2, b, numC[n], 1, false); } }
+      bool show = open_[y][x] || (over && mine[y][x]);
+      if (show) {
+        bool boom = x == boomX && y == boomY;
+        cv.fillRect(px, py, CS - 1, CS - 1, boom ? T.red : T.bg2);
+        if (mine[y][x]) drawMine(px, py, boom ? T.bg0 : (flag[y][x] ? T.green : T.grey));
+        else { int n = around(x, y); if (n) { char c[2] = {(char)('0' + n), 0}; text(px + 3, py + 2, c, numC[n], 1, false); } }
       } else {
-        cv.fillRect(px, py, CS - 1, CS - 1, T.edge);
-        cv.drawFastHLine(px, py, CS - 1, lerpc(T.edge, T.white, 0.3f));
-        if (flag[y][x]) { cv.fillTriangle(px + 3, py + 2, px + 3, py + 7, px + 8, py + 4, T.yel); cv.drawFastVLine(px + 3, py + 2, 8, T.white); }
+        tile(px, py, T.edge);
+        if (flag[y][x]) {
+          drawFlag(px, py);
+          if (over && !mine[y][x]) { cv.drawLine(px + 1, py + 1, px + 9, py + 9, T.yel); cv.drawLine(px + 9, py + 1, px + 1, py + 9, T.yel); }
+        }
       }
-      if (x == cx && y == cy && !over && !won) frame(px - 1, py - 1, CS + 1, CS + 1, T.cyan);
     }
-    char b[24];
-    uint32_t sec = first ? 0 : ((over || won) ? tEnd - t0 : millis() - t0) / 1000;
-    snprintf(b, sizeof(b), "%d/%d  %us", flags, mines, (unsigned)sec); text(80, 2, b, T.white, 1, false);
-    if (over) over3(120, "BOOM!", "OK = AGAIN", T.red);
-    if (won) { snprintf(b, sizeof(b), "%us  BEST %ds", (unsigned)sec, best); over3(120, "CLEARED!", b, T.green); }
-    hintBar({{"OK", "OPEN"}, {"F", "FLAG"}, {"M", "MINES"}, {"ESC", "BACK"}});
+    if (!over && !won) {
+      int px = OX + cx * CS, py = OY + cy * CS;
+      bool blink = (millis() / 250) & 1;
+      frame(px - 1, py - 1, CS + 1, CS + 1, blink ? T.white : T.cyan);
+    }
+    // side faces
+    const char* face = over ? "X(" : won ? "B)" : ":)";
+    text(4, 60, face, over ? T.red : won ? T.green : T.yel, 1, false);
+    text(2, 20, L[level][0] == 'N' ? "NRM" : L[level][0] == 'E' ? "EZ" : "HRD", T.dim, 1, false);
+    if (best) { snprintf(b, sizeof(b), "%d", best); text(OX + GW * CS + 4, 56, "BEST", T.dim, 1, false); text(OX + GW * CS + 4, 66, b, T.grey, 1, false); }
+    if (over) over3(120, "BOOM!", "OK = AGAIN   M = LEVEL", T.red);
+    if (won) { snprintf(b, sizeof(b), "%us   BEST %ds", (unsigned)sec, best); over3(120, "CLEARED!", b, T.green); }
+    hintBar({{"OK", "OPEN"}, {"F", "FLAG"}, {"M", "LEVEL"}, {"ESC", "BACK"}});
   }
 };
 
@@ -287,10 +360,13 @@ struct DuelApp : App {
     cy += constrain(target - cy, -sp, sp);
     cy = constrain(cy, 24.f, 112.f);
     if (serve) return;
+    float ox = bx;
     bx += vx; by += vy;
     if (by < 15 || by > 121) { vy = -vy; by = constrain(by, 15.f, 121.f); Audio::blip(300, 15, Audio::W_SQUARE, 0.2f); }
-    if (bx < 12 && bx > 6 && fabsf(by - py) < 12) { vx = fabsf(vx) * 1.05f; vy = (by - py) / 5; Audio::blip(600, 20, Audio::W_SQUARE, 0.3f); }
-    if (bx > 228 && bx < 234 && fabsf(by - cy) < 12) { vx = -fabsf(vx) * 1.05f; vy = (by - cy) / 5; Audio::blip(500, 20, Audio::W_SQUARE, 0.3f); }
+    if (vx < 0 && ox >= 10 && bx < 10 && fabsf(by - py) < 13) {
+      bx = 10; vx = fabsf(vx) * 1.05f; vy = (by - py) / 5; Audio::blip(600, 20, Audio::W_SQUARE, 0.3f); }
+    if (vx > 0 && ox <= 230 && bx > 230 && fabsf(by - cy) < 13) {
+      bx = 230; vx = -fabsf(vx) * 1.05f; vy = (by - cy) / 5; Audio::blip(500, 20, Audio::W_SQUARE, 0.3f); }
     vx = constrain(vx, -6.f, 6.f);
     if (bx < 0) { cs++; Audio::blip(150, 200, Audio::W_SAW); serveBall(-1); }
     if (bx > 240) { ps++; Audio::blip(1000, 120, Audio::W_TRI); serveBall(1); }
@@ -452,7 +528,9 @@ struct RunnerApp : App {
     }
     if (magnet) magnet--;
     for (size_t i = 0; i < dust.size(); i++) { dust[i].x += dust[i].v - speed * 0.3f; if (--dust[i].life <= 0) { dust.erase(dust.begin() + i); i--; } }
-    if ((int)(dist / 10) % 250 == 0 && dist > 50) { Audio::blip(880, 60, Audio::W_TRI, 0.2f); }
+    static int lastMile = 0;
+    int mile = (int)(dist / 2500);
+    if (mile != lastMile) { lastMile = mile; if (mile) Audio::blip(880, 60, Audio::W_TRI, 0.2f); }
   }
   void draw() override {
     // day -> sunset -> night cycle

@@ -53,8 +53,9 @@ struct BlocksApp : App {
   void reset() { memset(g, 0, sizeof(g)); score = lines = 0; level = 1; over = false; paused = false; nextP = random(7); spawn(); }
   void enter() override { best = loadScore("blocks"); if (!score || over) reset(); }
   void lock() {
+    bool spill = false;
     for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++)
-      if (cell(piece, rot, x, y) && py + y >= 0) g[py + y][px + x] = piece + 1;
+      if (cell(piece, rot, x, y)) { if (py + y >= 0) g[py + y][px + x] = piece + 1; else spill = true; }
     int cleared = 0;
     for (int y = BH - 1; y >= 0; y--) {
       bool full = true;
@@ -66,11 +67,12 @@ struct BlocksApp : App {
     lines += cleared;
     level = 1 + lines / 10;
     if (cleared) Audio::blip(660 + cleared * 220, 90, Audio::W_SQUARE); else Audio::blip(220, 20, Audio::W_TRI, 0.3f);
+    if (spill && !cleared) { over = true; if (score > best) { best = score; saveScore("blocks", best); } Audio::blip(110, 400, Audio::W_SAW); return; }
     spawn();
   }
   bool key(const KeyEv& e) override {
     if (over) { if (e.code == K_ENTER) { reset(); return true; } return false; }
-    if (e.code == K_CHAR && e.ch == 'p') { paused = !paused; return true; }
+    if (e.is('p')) { paused = !paused; return true; }
     if (paused) return false;
     KeyCode k = gdir(e);
     if (k == K_LEFT && fits(piece, rot, px - 1, py)) { px--; return true; }
@@ -148,20 +150,20 @@ struct BreakoutApp : App {
   }
   void reset() { lives = 3; score = 0; level = 1; over = false; build(); serve(); }
   void serve() { stuck = true; vx = 1.3f; vy = -1.9f - level * 0.15f; }
-  void enter() override { best = loadScore("breakout"); float a, b, c; tilt = imuAccel(a, b, c); if (over || !score) reset(); }
+  void enter() override { best = loadScore("breakout"); if (over || !score) reset(); }
   bool key(const KeyEv& e) override {
     if (over) { if (e.code == K_ENTER) { reset(); return true; } return false; }
     KeyCode k = gdir(e);
     if (k == K_LEFT) { padX -= e.rep ? 10 : 7; return true; }
     if (k == K_RIGHT) { padX += e.rep ? 10 : 7; return true; }
     if (e.code == K_CHAR && e.ch == ' ') { stuck = false; return true; }
-    if (e.is('t')) { tilt = !tilt; toast(tilt ? "TILT CONTROL ON" : "TILT OFF"); return true; }
+    if (e.is('t')) { float a, b, c; tilt = !tilt && imuAccel(a, b, c); toast(tilt ? "TILT CONTROL ON" : "TILT OFF"); return true; }
     return false;
   }
   void tick() override {
     if (over) return;
     float ax, ay, az;
-    if (tilt && imuAccel(ax, ay, az)) padX += ax * -9.f;  // tilt left/right
+    if (tilt && imuAccel(ax, ay, az) && fabsf(ax) > 0.06f) padX += ax * (cfg.rot == 3 ? -9.f : 9.f);  // tilt left/right (dead zone)
     for (auto h : heldKeys) { if (h == ',') padX -= 4; if (h == '/') padX += 4; }
     padX = constrain(padX, 4 + padW / 2.f, 236 - padW / 2.f);
     if (stuck) { bx = padX; by = 112; return; }
@@ -173,6 +175,7 @@ struct BreakoutApp : App {
       if (by >= 114 && by <= 118 && vy > 0 && fabsf(bx - padX) <= padW / 2 + 2) {
         vy = -fabsf(vy);
         vx = (bx - padX) / (padW / 2) * 2.2f;
+        if (fabsf(vx) < 0.35f) vx = vx < 0 ? -0.35f : 0.35f;
         Audio::blip(440, 25, Audio::W_SQUARE, 0.3f);
       }
       if (by > 124) {

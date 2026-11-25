@@ -46,6 +46,16 @@ struct SudokuApp : App {
     for (int i = 0; i < remove; i++) { grid[idx[i]] = 0; given[idx[i]] = 0; }
     won = false; check = false; t0 = millis();
   }
+  bool clash(int i) {  // same number twice in a row / column / box
+    int v = grid[i], r = i / 9, c = i % 9;
+    if (!v) return false;
+    for (int j = 0; j < 81; j++) {
+      if (j == i || grid[j] != v) continue;
+      int rr = j / 9, cc = j % 9;
+      if (rr == r || cc == c || (rr / 3 == r / 3 && cc / 3 == c / 3)) return true;
+    }
+    return false;
+  }
   void enter() override { best = loadScore("sudoku"); static bool g = false; if (!g || won) { g = true; gen(); } }
   bool key(const KeyEv& e) override {
     if (won) { if (e.code == K_ENTER) { gen(); return true; } return e.code != K_ESC; }
@@ -56,8 +66,8 @@ struct SudokuApp : App {
     if (k == K_RIGHT) { cur = cur / 9 * 9 + (cur % 9 + 1) % 9; return true; }
     if (e.code == K_CHAR && e.ch >= '1' && e.ch <= '9' && !given[cur]) {
       grid[cur] = e.ch - '0';
-      bool done = true;
-      for (int i = 0; i < 81; i++) if (grid[i] != sol[i]) done = false;
+      bool done = true;  // any valid filled grid counts (puzzles can have more than one answer)
+      for (int i = 0; i < 81 && done; i++) if (!grid[i] || clash(i)) done = false;
       if (done) { won = true; tEnd = millis(); int s = (tEnd - t0) / 1000; if (!best || s < best) { best = s; saveScore("sudoku", best); } Audio::blip(1320, 200, Audio::W_SQUARE, 0.3f); }
       return true;
     }
@@ -80,7 +90,7 @@ struct SudokuApp : App {
       cv.fillRect(x, y, cs - 1, cs - 1, bg);
       if (grid[i]) {
         char b[2] = {(char)('0' + grid[i]), 0};
-        uint16_t col = given[i] ? T.white : (check && grid[i] != sol[i]) ? T.red : T.cyan;
+        uint16_t col = given[i] ? T.white : (check && clash(i)) ? T.red : T.cyan;
         text(x + 3, y + 2, b, col, 1, false);
       }
     }

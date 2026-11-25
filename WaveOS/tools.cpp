@@ -193,7 +193,7 @@ struct CalcApp : App {
   void draw() override {
     background(true);
     statusBar("CALC", T.yel);
-    text(190, 2, Expr::deg ? "DEG" : "RAD", T.grey, 1, false);
+    text(140, 2, Expr::deg ? "DEG" : "RAD", T.grey, 1, false);
     panel(3, 14, 234, 80, T.edge, T.bg0);
     int n = histE.size();
     int rows = 4;
@@ -508,7 +508,7 @@ struct ResistorApp : App {
     background();
     statusBar("RESISTOR", T.yel);
     const char* mn[3] = {"4-BAND", "5-BAND", "FIND BANDS"};
-    text(150, 2, mn[mode], T.purp, 1, false);
+    text(100, 2, mn[mode], T.purp, 1, false);
     if (mode < 2) {
       int n = mode == 0 ? 4 : 5;
       int* b = mode == 0 ? b4 : b5;

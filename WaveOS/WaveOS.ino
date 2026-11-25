@@ -1,8 +1,9 @@
 // =====================================================================
 //  WAVE OS  -  custom firmware for the M5Stack Cardputer ADV
-//  DAP + synth/looper + USB MIDI + guitar tools + IR remote + tools + notes + games
+//  DAP + synth/looper + IR remote + tools + notes + games
 // =====================================================================
 #include "common.h"
+#include "boot_img.h"
 #include "audio.h"
 #include <SPI.h>
 #include <esp_sleep.h>
@@ -120,9 +121,9 @@ void goHome() { openApp(appHome); }
 // ===================================================================== HOME (+ global search)
 struct HomeApp : App {
   struct Item { const char* n; int icon; App** target; };
-  static constexpr int N = 11;
+  static constexpr int N = 9;
   Item items[N] = {{"MUSIC", IC_MUSIC, &appMusic}, {"SYNTH", IC_SYNTH, &appSynth}, {"DRUMS", IC_DRUMS, &appDrums},
-                   {"MIDI", IC_MIDI, &appMidi}, {"GUITAR", IC_GUITAR, &appGuitar}, {"IR", IC_IR, &appIR},
+                   {"IR", IC_IR, &appIR},
                    {"TOOLS", IC_TOOLS, &appTools}, {"NOTES", IC_NOTES, &appNotes}, {"GAMES", IC_GAMES, &appGames},
                    {"FUN", IC_FUN, &appFun}, {"SETUP", IC_SETUP, &appSettings}};
   int sel = 0;
@@ -137,8 +138,8 @@ struct HomeApp : App {
   bool wantsAllKeys() override { return searching; }
   uint16_t acc(int i) {
     switch (i) {
-      case 0: return T.cyan; case 1: return T.purp; case 2: return T.pink; case 3: return T.pink; case 4: return T.green;
-      case 5: return T.red; case 6: return T.yel; case 7: return T.green; case 8: return T.blue; case 9: return T.green; default: return T.grey;
+      case 0: return T.cyan; case 1: return T.purp; case 2: return T.pink;
+      case 3: return T.red; case 4: return T.yel; case 5: return T.green; case 6: return T.blue; case 7: return T.green; default: return T.grey;
     }
   }
   const char* sub(int i) {
@@ -149,13 +150,11 @@ struct HomeApp : App {
         return "WAV MP3 FLAC AAC";
       case 1: return Looper::playing ? "LOOPER RUNNING" : "ARP CHORDS LOOPER";
       case 2: return Drums::playing ? "BEAT RUNNING" : "16 STEP DRUM MACHINE";
-      case 3: return "USB + BT  .MID PLAYER";
-      case 4: return "TUNER  METRONOME  CHORDS";
-      case 5: return "TV  LEARN  MACROS  .IR";
-      case 6: return "CALC GRAPH TIMER LIGHT";
-      case 7: return "MARKDOWN ON SD";
-      case 8: return "17 GAMES";
-      case 9: return "QUIET GAMES FOR CLASS";
+      case 3: return "TV  LEARN  RECEIVE  .IR";
+      case 4: return "CALC METRONOME TIMER";
+      case 5: return "MARKDOWN ON SD";
+      case 6: return "17 GAMES";
+      case 7: return "13 QUIET GAMES + TOYS";
       default: return "SOUND SCREEN THEME";
     }
   }
@@ -169,7 +168,8 @@ struct HomeApp : App {
                               {"STARFALL", "x"}, {"MINES", "m"}, {"DUEL", "d"}, {"ECHO", "h"}, {"RUNNER", "u"},
                               {"MAZE", "z"}, {"FOUR", "4"}, {"TANKS", "k"}, {"ROCKS", "q"}, {"HOPPER", "p"},
                               {"SUDOKU", "1"}, {"WORDS", "2"}, {"PET", "3"}, {"DOODLE", "5"}, {"TIC TAC TOE", "6"}, {"BUBBLES", "7"}, {"ORACLE", "8"},
-                              {"FLASHLIGHT", "l"}, {"MORSE", "o"}};
+                              {"FLASHLIGHT", "l"}, {"MORSE", "o"}, {"FIVE", ""}, {"CODE", ""}, {"LIGHTS", ""}, {"SLIDE", ""},
+                              {"REFLEX", ""}, {"LIFE", ""}, {"METRONOME", ""}};
     for (int i = 0; i < 31; i++) { String n = extra[i][0]; n.toLowerCase(); if (n.indexOf(lq) >= 0) res.push_back({3, i, String("APP  ") + extra[i][0]}); }
     std::vector<int> songs;
     searchSongs(q, songs, 6);
@@ -186,7 +186,8 @@ struct HomeApp : App {
     else {
       App* sub[] = {appCalc, appGraph, appResistor, appElec, appTimer, appSnake, app2048, appBlocks, appBreakout, appFlappy, appTyping, appRhythm,
                     appStarfall, appMines, appDuel, appEcho, appRunner, appMaze, appFour, appTanks, appRocks, appHopper,
-                    appSudoku, appWords, appPet, appDoodle, appTtt, appBubbles, appOracle, appFlash, appMorse};
+                    appSudoku, appWords, appPet, appDoodle, appTtt, appBubbles, appOracle, appFlash, appMorse,
+                    appFive, appCode, appLights, appSlide, appReflex, appLife, appMetro};
       openApp(sub[r.idx]);
     }
   }
@@ -205,7 +206,7 @@ struct HomeApp : App {
     if (k == K_LEFT || k == K_UP) { sel = (sel + N - 1) % N; return true; }
     if (k == K_RIGHT || k == K_DOWN) { sel = (sel + 1) % N; return true; }
     if (k == K_ENTER) { openApp(*items[sel].target); return true; }
-    if (e.code == K_CHAR && isdigit((unsigned char)e.ch)) { sel = e.ch == '0' ? 9 : e.ch - '1'; openApp(*items[sel].target); return true; }  // 0 = FUN
+    if (e.code == K_CHAR && isdigit((unsigned char)e.ch)) { if (e.ch == '0') return true; sel = e.ch - '1'; openApp(*items[sel].target); return true; }  // 1-9
     if (e.code == K_CHAR && isalpha((unsigned char)e.ch) && !e.fn) { searching = true; q = String(e.ch); runSearch(); return true; }
     if (k == K_ESC) return true;
     return false;
@@ -243,7 +244,7 @@ struct HomeApp : App {
       int dx = cx - N * 4 + i * 8;
       cv.fillRect(dx, 108, i == sel ? 4 : 2, 2, i == sel ? T.cyan : T.dim);
     }
-    hintBar({{"<>", "MOVE"}, {"OK", "OPEN"}, {"0-9", "JUMP"}, {"A-Z", "SEARCH"}});
+    hintBar({{"<>", "MOVE"}, {"OK", "OPEN"}, {"1-9", "JUMP"}, {"A-Z", "SEARCH"}});
     if (searching) {
       panel(14, 16, 212, 106, T.cyan, T.bg1);
       frame(13, 15, 214, 108, lerpc(T.bg0, T.cyan, 0.3f));
@@ -309,7 +310,7 @@ static uint16_t accGreen() { return T.green; }
 // ===================================================================== SETTINGS
 struct SettingsApp : App {
   int sel = 0, top = 0;
-  static constexpr int N = 15;
+  static constexpr int N = 14;
   SettingsApp() { name = "SETUP"; }
   void leave() override { saveSettings(); }
   void adjust(int d) {
@@ -326,10 +327,9 @@ struct SettingsApp : App {
       case 6: { const uint8_t o[] = {0, 30, 60, 120, 240}; int i = 0; while (i < 5 && o[i] != cfg.dimSec) i++; cfg.dimSec = o[(i + 5 + d) % 5]; break; }
       case 7: { const uint8_t o[] = {0, 5, 10, 30, 60}; int i = 0; while (i < 5 && o[i] != cfg.sleepMin) i++; cfg.sleepMin = o[(i + 5 + d) % 5]; break; }
       case 8: cfg.irRx = cfg.irRx == 1 ? 2 : 1; break;
-      case 9: cfg.midiCh = (cfg.midiCh + 15 + d) % 16 + 1; break;
-      case 10: cfg.rot = cfg.rot == 1 ? 3 : 1; applyRotation(); break;
-      case 11: { const uint8_t o[] = {0, 10, 20, 45, 90}; int i = 0; while (i < 5 && o[i] != cfg.musicOff) i++; cfg.musicOff = o[(i + 5 + d) % 5]; break; }
-      case 12: cfg.bootSound = !cfg.bootSound; break;
+      case 9: cfg.rot = cfg.rot == 1 ? 3 : 1; applyRotation(); break;
+      case 10: { const uint8_t o[] = {0, 10, 20, 45, 90}; int i = 0; while (i < 5 && o[i] != cfg.musicOff) i++; cfg.musicOff = o[(i + 5 + d) % 5]; break; }
+      case 11: cfg.bootSound = !cfg.bootSound; break;
     }
   }
   bool key(const KeyEv& e) override {
@@ -347,7 +347,7 @@ struct SettingsApp : App {
   void draw() override {
     background();
     statusBar("SETUP", T.grey);
-    const char* names[N] = {"VOLUME", "MAX VOLUME", "BRIGHTNESS", "THEME", "KEY CLICK", "SHAKE SHUFFLE", "SCREENSAVER", "AUTO SLEEP", "IR RX PIN", "MIDI CHANNEL", "SCREEN FLIP", "MUSIC SCR OFF", "BOOT SOUND", "BATTERY", "ABOUT"};
+    const char* names[N] = {"VOLUME", "MAX VOLUME", "BRIGHTNESS", "THEME", "KEY CLICK", "SHAKE SHUFFLE", "SCREENSAVER", "AUTO SLEEP", "IR RX PIN", "SCREEN FLIP", "MUSIC SCR OFF", "BOOT SOUND", "BATTERY", "ABOUT"};
     panel(4, 15, 232, 108, T.edge);
     const int rows = 8;
     if (sel < top) top = sel;
@@ -369,12 +369,11 @@ struct SettingsApp : App {
         case 6: if (cfg.dimSec) snprintf(b, sizeof(b), "%dS", cfg.dimSec); else snprintf(b, sizeof(b), "NEVER"); break;
         case 7: if (cfg.sleepMin) snprintf(b, sizeof(b), "%d MIN", cfg.sleepMin); else snprintf(b, sizeof(b), "NEVER"); break;
         case 8: snprintf(b, sizeof(b), "GROVE G%d", cfg.irRx); break;
-        case 9: snprintf(b, sizeof(b), "CH %d", cfg.midiCh); break;
-        case 10: snprintf(b, sizeof(b), "%s", cfg.rot == 3 ? "NORMAL" : "FLIPPED"); break;
-        case 11: if (cfg.musicOff) snprintf(b, sizeof(b), "%dS", cfg.musicOff); else snprintf(b, sizeof(b), "NEVER"); break;
-        case 12: snprintf(b, sizeof(b), "%s", cfg.bootSound ? "ON" : "OFF"); break;
-        case 13: snprintf(b, sizeof(b), "%d%%  %.2fV %s", Batt::pct, Batt::mv / 1000.f, Batt::charging ? "CHARGING" : Batt::usb ? "FULL" : "ON BATTERY"); break;
-        case 14: snprintf(b, sizeof(b), "%s V%s", FW_NAME, FW_VER); break;
+        case 9: snprintf(b, sizeof(b), "%s", cfg.rot == 3 ? "NORMAL" : "FLIPPED"); break;
+        case 10: if (cfg.musicOff) snprintf(b, sizeof(b), "%dS", cfg.musicOff); else snprintf(b, sizeof(b), "NEVER"); break;
+        case 11: snprintf(b, sizeof(b), "%s", cfg.bootSound ? "ON" : "OFF"); break;
+        case 12: snprintf(b, sizeof(b), "%d%%  %.2fV %s", Batt::pct, Batt::mv / 1000.f, Batt::charging ? "CHARGING" : Batt::usb ? "FULL" : "ON BATTERY"); break;
+        case 13: snprintf(b, sizeof(b), "%s V%s", FW_NAME, FW_VER); break;
       }
       text(hasBar ? 196 : 120, y, b, s ? T.cyan : T.grey, 1, false);
     }
@@ -426,6 +425,22 @@ static void screenshot() {
 }
 
 // ------------------------------------------------------------------ boot
+static void drawBootFrame(float t) {
+  // the neon wave picture, revealed left -> right behind a soft edge
+  const uint16_t BG = RGB(2, 4, 10);
+  cv.drawJpg(BOOT_JPG, sizeof(BOOT_JPG), 0, 0);
+  int rx = (int)(std::min(t * 1.15f, 1.f) * 270) - 20;
+  for (int x = std::max(0, rx); x < 240; x++) {
+    float k = constrain((x - rx) / 18.f, 0.f, 1.f);
+    if (k >= 1) { cv.fillRect(x, 0, 240 - x, 135, BG); break; }
+    for (int y = 0; y < 135; y++) cv.drawPixel(x, y, lerpc(cv.readPixel(x, y), BG, k));
+  }
+  float a = constrain((t - 0.5f) * 2.f, 0.f, 1.f);  // fade the title in
+  if (a > 0) {
+    textC(120, 100, FW_NAME, lerpc(BG, RGB(235, 242, 255), a), 2, false);
+    textC(120, 119, "CARDPUTER ADV  V" FW_VER, lerpc(BG, RGB(110, 124, 150), a), 1, false);
+  }
+}
 static void bootAnim() {
   const uint8_t chime[4] = {72, 76, 79, 84};
   uint32_t t0 = millis();
@@ -435,13 +450,7 @@ static void bootAnim() {
     float t = (millis() - t0) / 1100.f;
     if (t > 1.2f && still) { delay(16); continue; }  // logo complete: hold the image, no more transfers
     still = t > 1.2f;
-    background();
-    drawWave(22, 218, 62, 24, 0, true, std::min(t, 1.f));
-    float a = constrain((t - 0.45f) * 2.f, 0.f, 1.f);  // fade the title in
-    if (a > 0) {
-      textC(120, 94, FW_NAME, lerpc(T.bg0, T.white, a), 2, false);
-      textC(120, 112, "CARDPUTER ADV  V" FW_VER, lerpc(T.bg0, T.grey, a), 1, false);
-    }
+    drawBootFrame(t);
     if (cfg.bootSound && ni < 4 && millis() - t0 > 200 + ni * 130) { Audio::blip(440.f * powf(2.f, (chime[ni] - 69) / 12.f), 110, Audio::W_TRI, 0.35f); ni++; }
     cv.pushSprite(0, 0);
     delay(16);
@@ -544,7 +553,6 @@ static void powerTick(bool screenIsOff) {
 extern void musicTick();
 extern void timerTick();
 extern void irTick();
-extern void midiTick();
 
 void setup() {
   setCpuFrequencyMhz(160);  // set BEFORE the display starts: changing it mid-transfer corrupts a row of pixels
@@ -586,7 +594,7 @@ void setup() {
   appHome = new HomeApp();
   appTools = new MenuApp("TOOLS", {{"CALC", "SCIENTIFIC", IC_CALC, &appCalc}, {"GRAPH", "F(X) PLOT", IC_GRAPH, &appGraph},
                                    {"RESISTOR", "COLOR CODE", IC_RES, &appResistor}, {"ELEC", "OHM LED 555", IC_ELEC, &appElec},
-                                   {"TIMER", "STOPWATCH", IC_TIMER, &appTimer},
+                                   {"TIMER", "STOPWATCH", IC_TIMER, &appTimer}, {"METRONOME", "TAP TEMPO", IC_METRO, &appMetro},
                                    {"FLASHLIGHT", "LIGHT / SOS", IC_FLASH, &appFlash}, {"MORSE", "BEEP CODE", IC_MORSE, &appMorse}}, accYel);
   appGames = new MenuApp("GAMES", {{"STARFALL", "SHOOTER", IC_STARFALL, &appStarfall}, {"RUNNER", "ENDLESS", IC_RUNNER, &appRunner},
                                    {"SNAKE", "CLASSIC", IC_SNAKE, &appSnake}, {"BLOCKS", "LINE CLEAR", IC_BLOCKS, &appBlocks},
@@ -599,11 +607,15 @@ void setup() {
                                    {"MAZE", "ESCAPE", IC_MAZE, &appMaze}}, accBlue);
   appSettings = new SettingsApp();
   appFun = new MenuApp("FUN", {{"SUDOKU", "LOGIC", IC_SUDOKU, &appSudoku}, {"WORDS", "GUESS IT", IC_WORDS, &appWords},
-                               {"PIXEL PET", "LOOK AFTER IT", IC_PET, &appPet}, {"DOODLE", "PIXEL ART", IC_DOODLE, &appDoodle},
+                               {"PIXEL PET", "CARE FOR IT", IC_PET, &appPet}, {"DOODLE", "PIXEL ART", IC_DOODLE, &appDoodle},
                                {"TIC TAC TOE", "CPU / 2P", IC_TTT, &appTtt}, {"BUBBLES", "POP POP", IC_BUBBLES, &appBubbles},
-                               {"ORACLE", "DICE COIN ASK", IC_ORACLE, &appOracle}}, accGreen);
-  for (App* a : {appSudoku, appWords, appPet, appDoodle, appTtt, appBubbles, appOracle}) a->parent = appFun;
-  for (App* a : {appCalc, appGraph, appResistor, appElec, appTimer, appFlash, appMorse}) a->parent = appTools;
+                               {"ORACLE", "DICE COIN ASK", IC_ORACLE, &appOracle}, {"FIVE", "WORD IN 6", IC_FIVE, &appFive},
+                               {"CODE", "CRACK IT", IC_CODE, &appCode}, {"LIGHTS", "ALL OFF", IC_LIGHTS, &appLights},
+                               {"SLIDE", "15 PUZZLE", IC_SLIDE, &appSlide}, {"REFLEX", "REACTION", IC_REFLEX, &appReflex},
+                               {"LIFE", "PIXEL LIFE", IC_LIFE, &appLife}}, accGreen);
+  for (App* a : {appSudoku, appWords, appPet, appDoodle, appTtt, appBubbles, appOracle, appFive, appCode, appLights, appSlide, appReflex, appLife})
+    a->parent = appFun;
+  for (App* a : {appCalc, appGraph, appResistor, appElec, appTimer, appMetro, appFlash, appMorse}) a->parent = appTools;
   for (App* a : {appSnake, app2048, appBlocks, appBreakout, appFlappy, appTyping, appRhythm, appStarfall, appMines, appDuel, appEcho, appRunner,
                  appMaze, appFour, appTanks, appRocks, appHopper})
     a->parent = appGames;
@@ -630,10 +642,53 @@ void setup() {
   lastInput = millis();
 }
 
+// ------------------------------------------------------------------ USB dev commands (for screenshots / testing from a PC)
+//   SHOT           -> "SHOT 240 135\n" + raw RGB565 big-endian frame
+//   K<c>           -> press key c        KENT KESC KTAB KDEL KUP KDN KLT KRT
+static void serialDev(std::vector<KeyEv>& keys) {
+  static char line[24];
+  static int n = 0;
+  static char holdC[4]; static uint32_t holdUntil[4]; static int holdN = 0;  // H<c><ms>: hold a key down
+  for (int i = 0; i < holdN; i++) if (millis() < holdUntil[i]) heldKeys.push_back(holdC[i]);
+  while (Serial.available()) {
+    int c = Serial.read();
+    if (c == '\r') continue;
+    if (c != '\n') { if (n < 23) line[n++] = c; continue; }
+    line[n] = 0; n = 0;
+    if (line[0] == 'H' && line[1]) {
+      int slot = holdN < 4 ? holdN++ : 0;
+      for (int i = 0; i < holdN; i++) if (millis() >= holdUntil[i]) { slot = i; break; }
+      holdC[slot] = line[1]; holdUntil[slot] = millis() + (line[2] ? atoi(line + 2) : 1500);
+      continue;
+    }
+    bool logo = !strcmp(line, "LOGO");  // dev: screenshot of the boot screen
+    if (logo) drawBootFrame(1.5f);
+    if (logo || !strcmp(line, "SHOT")) {
+      Serial.printf("SHOT 240 135\n");
+      static uint8_t row[480];
+      for (int y = 0; y < 135; y++) {
+        for (int x = 0; x < 240; x++) { uint16_t v = cv.readPixel(x, y); row[x * 2] = v >> 8; row[x * 2 + 1] = v & 255; }
+        Serial.write(row, 480);
+      }
+      Serial.flush();
+    } else if (line[0] == 'K' && line[1]) {
+      KeyEv e;
+      const char* k = line + 1;
+      if (!strcmp(k, "ENT")) e.code = K_ENTER; else if (!strcmp(k, "ESC")) e.code = K_ESC;
+      else if (!strcmp(k, "TAB")) e.code = K_TAB; else if (!strcmp(k, "DEL")) e.code = K_BACK;
+      else if (!strcmp(k, "UP")) { e.code = K_CHAR; e.ch = ';'; } else if (!strcmp(k, "DN")) { e.code = K_CHAR; e.ch = '.'; }
+      else if (!strcmp(k, "LT")) { e.code = K_CHAR; e.ch = ','; } else if (!strcmp(k, "RT")) { e.code = K_CHAR; e.ch = '/'; }
+      else { e.code = K_CHAR; e.ch = k[0]; }
+      keys.push_back(e);
+    }
+  }
+}
+
 void loop() {
   uint32_t t0 = millis();
   M5Cardputer.update();
   auto keys = pollKeys();
+  serialDev(keys);
   bool g0 = M5Cardputer.BtnA.wasPressed();
   bool anyInput = !keys.empty() || g0 || !heldKeys.empty();
   if (screenOff && !keys.empty()) {  // screen off: media keys work without waking the screen
@@ -686,20 +741,19 @@ void loop() {
   }
   lowBatteryTick();
   irTick();
-  midiTick();
   try { cur->tick(); } catch (std::bad_alloc&) { toast("OUT OF MEMORY", 2500); }
 
   uint32_t idle = millis() - lastInput;
   bool busy = (Music::active() && !Music::paused()) || Looper::playing || Looper::counting || cur == appFlash;
   if (cfg.sleepMin && !busy && idle > cfg.sleepMin * 60000UL) deepSleep();
   if (!Batt::usb && Batt::pct >= 0 && Batt::mv > 2500 && Batt::mv < 3320 && millis() > 30000) deepSleep();  // protect the battery
-  if (!saver && !screenOff && cfg.dimSec && idle > cfg.dimSec * 1000UL && cur != appGuitar && cur != appFlash) {
+  if (!saver && !screenOff && cfg.dimSec && idle > cfg.dimSec * 1000UL && cur != appMetro && cur != appFlash) {
     saver = true;
     M5Cardputer.Display.setBrightness(std::max(10, cfg.bright / 4));
   }
   // music playing + idle: switch the screen off (the backlight is the biggest power draw)
   bool musicOn = Music::active() && !Music::paused();
-  if (!screenOff && musicOn && cfg.musicOff && idle > cfg.musicOff * 1000UL && cur != appGuitar) {
+  if (!screenOff && musicOn && cfg.musicOff && idle > cfg.musicOff * 1000UL && cur != appMetro) {
     saver = false; screenOff = true; M5Cardputer.Display.setBrightness(0); M5Cardputer.Display.sleep();
   }
   powerTick(screenOff);

@@ -7,7 +7,7 @@
 #include <initializer_list>
 
 #define FW_NAME "WAVE OS"
-#define FW_VER  "1.18"
+#define FW_VER  "1.22"
 
 // ---------------------------------------------------------------- theme
 struct Theme {
@@ -52,7 +52,8 @@ enum IconId { IC_MUSIC, IC_SYNTH, IC_MIDI, IC_IR, IC_TOOLS, IC_NOTES, IC_GAMES, 
               IC_CALC, IC_GRAPH, IC_RES, IC_SNAKE, IC_2048, IC_GUITAR, IC_ELEC, IC_BLOCKS,
               IC_BREAKOUT, IC_FLAPPY, IC_TYPING, IC_RHYTHM, IC_DRUMS, IC_STARFALL, IC_MINES,
               IC_DUEL, IC_ECHO, IC_RUNNER, IC_MAZE, IC_FOUR, IC_TANKS, IC_ROCKS, IC_HOPPER, IC_TIMER, IC_FUN, IC_SUDOKU, IC_WORDS, IC_PET, IC_DOODLE,
-              IC_TTT, IC_BUBBLES, IC_ORACLE, IC_WIFI, IC_FLASH, IC_MORSE, IC_COUNT };
+              IC_TTT, IC_BUBBLES, IC_ORACLE, IC_WIFI, IC_FLASH, IC_MORSE,
+              IC_LIGHTS, IC_SLIDE, IC_REFLEX, IC_CODE, IC_FIVE, IC_LIFE, IC_METRO, IC_COUNT };
 
 // ---------------------------------------------------------------- input
 enum KeyCode : uint8_t { K_NONE, K_CHAR, K_UP, K_DOWN, K_LEFT, K_RIGHT, K_ENTER, K_BACK, K_ESC, K_TAB };
@@ -86,11 +87,12 @@ void goBack();
 void goHome();
 extern App *appHome, *appMusic, *appSynth, *appIR, *appTools, *appNotes, *appGames,
            *appSettings, *appCalc, *appGraph, *appResistor, *appSnake, *app2048,
-           *appMidi, *appGuitar, *appElec, *appBlocks, *appBreakout, *appFlappy, *appTyping, *appRhythm,
+           *appMetro, *appElec, *appBlocks, *appBreakout, *appFlappy, *appTyping, *appRhythm,
            *appDrums, *appStarfall, *appMines, *appDuel, *appEcho, *appRunner,
            *appMaze, *appFour, *appTanks, *appRocks, *appHopper, *appTimer,
            *appFun, *appSudoku, *appWords, *appPet, *appDoodle, *appTtt, *appBubbles, *appOracle,
-           *appWifi, *appFlash, *appMorse;
+           *appWifi, *appFlash, *appMorse,
+           *appLights, *appSlide, *appReflex, *appCode, *appFive, *appLife;
 
 // ---------------------------------------------------------------- settings
 struct Settings {

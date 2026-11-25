@@ -28,7 +28,7 @@ static const Brand BRANDS[] = {
 };
 static constexpr int NBR = sizeof(BRANDS) / sizeof(BRANDS[0]);
 
-struct Learned { bool set; IRData d; };
+struct Learned { bool set; IRData d; std::vector<uint16_t> raw; };  // raw (us) for remotes with unknown protocols
 static Learned learned[NB];
 static bool learning = false;
 static int learnSlot = -1;
@@ -38,7 +38,7 @@ static uint32_t sentT = 0;
 static bool txReady = false;
 
 static void loadLearned() {
-  memset(learned, 0, sizeof(learned));
+  for (auto& l : learned) { l.set = false; memset(&l.d, 0, sizeof(IRData)); l.raw.clear(); }
   File f = SD.open("/ir/learned.txt");
   if (!f) return;
   while (f.available()) {
@@ -46,11 +46,20 @@ static void loadLearned() {
     int s, p, a, c, b;
     if (sscanf(l.c_str(), "%d %d %x %x %d", &s, &p, &a, &c, &b) == 5 && s >= 0 && s < NB) {
       learned[s].set = true;
-      memset(&learned[s].d, 0, sizeof(IRData));
       learned[s].d.protocol = (decode_type_t)p;
       learned[s].d.address = a;
       learned[s].d.command = c;
       learned[s].d.numberOfBits = b;
+      int r = l.indexOf(" raw ");  // "slot 0 0 0 0 raw 9000 4500 560 ..."
+      if (r > 0) {
+        const char* q = l.c_str() + r + 5;
+        while (*q && learned[s].raw.size() < 400) {
+          char* e; long v = strtol(q, &e, 10);
+          if (e == q) break;
+          learned[s].raw.push_back((uint16_t)constrain(v, 1L, 65000L));
+          q = e;
+        }
+      }
     }
   }
   f.close();
@@ -59,8 +68,12 @@ static void saveLearned() {
   if (!sdOK) return;
   File f = SD.open("/ir/learned.txt", FILE_WRITE);
   if (!f) return;
-  for (int i = 0; i < NB; i++)
-    if (learned[i].set) f.printf("%d %d %x %x %d\n", i, (int)learned[i].d.protocol, learned[i].d.address, learned[i].d.command, learned[i].d.numberOfBits);
+  for (int i = 0; i < NB; i++) {
+    if (!learned[i].set) continue;
+    f.printf("%d %d %x %x %d", i, (int)learned[i].d.protocol, learned[i].d.address, learned[i].d.command, learned[i].d.numberOfBits);
+    if (learned[i].raw.size()) { f.print(" raw"); for (auto t : learned[i].raw) f.printf(" %u", t); }
+    f.print("\n");
+  }
   f.close();
 }
 
@@ -69,8 +82,13 @@ static String sendCode(int brand, int b) {
   char info[48] = "";
   if (brand == NBR) {
     if (!learned[b].set) return "";
-    IrSender.write(&learned[b].d, 1);
-    snprintf(info, sizeof(info), "%s A%X C%X", getProtocolString(learned[b].d.protocol), learned[b].d.address, learned[b].d.command);
+    if (learned[b].raw.size()) {
+      IrSender.sendRaw(learned[b].raw.data(), learned[b].raw.size(), 38);
+      snprintf(info, sizeof(info), "RAW %d TIMINGS", (int)learned[b].raw.size());
+    } else {
+      IrSender.write(&learned[b].d, 1);
+      snprintf(info, sizeof(info), "%s A%X C%X", getProtocolString(learned[b].d.protocol), learned[b].d.address, learned[b].d.command);
+    }
   } else {
     const Brand& br = BRANDS[brand];
     uint8_t c = br.cmd[b];
@@ -91,6 +109,80 @@ static String sendCode(int brand, int b) {
   sentT = millis();
   return String(info);
 }
+
+// ---- receiver on the Grove port (G1 or G2). Both pins are watched, so if the receiver's signal
+// wire is on the other pin we switch to it automatically.
+static volatile uint32_t edgeN[3] = {0, 0, 0}, edgeT[3] = {0, 0, 0};
+static void IRAM_ATTR isrG1() { edgeN[1]++; edgeT[1] = millis(); }
+static void IRAM_ATTR isrG2() { edgeN[2]++; edgeT[2] = millis(); }
+static bool rxOn = false;
+static uint32_t rxIgnoreUntil = 0, rxSeen[3] = {0, 0, 0};
+static int rxPin() { return cfg.irRx == 2 ? 2 : 1; }
+static void rxPins() {  // active pin: pull-up (works with open-collector / diode wiring); other pin: pull-down so it can't float
+  pinMode(rxPin(), INPUT_PULLUP);
+  pinMode(3 - rxPin(), INPUT_PULLDOWN);
+}
+static void rxStart() {
+  if (rxOn) return;
+  IrReceiver.begin(rxPin(), false);
+  rxPins();
+  attachInterrupt(1, isrG1, CHANGE);
+  attachInterrupt(2, isrG2, CHANGE);
+  edgeN[1] = edgeN[2] = 0; rxSeen[1] = rxSeen[2] = 0;
+  rxOn = true;
+}
+static void rxStop() {
+  if (!rxOn) return;
+  detachInterrupt(1); detachInterrupt(2);
+  IrReceiver.stop();
+  pinMode(1, INPUT); pinMode(2, INPUT);
+  rxOn = false;
+}
+static void rxSwitch(int pin) {
+  if (pin == rxPin()) return;
+  cfg.irRx = pin;
+  saveSettings();
+  IrReceiver.stop();
+  IrReceiver.begin(rxPin(), false);
+  rxPins();
+  edgeN[1] = edgeN[2] = 0; rxSeen[1] = rxSeen[2] = 0;
+}
+// a burst of edges on the inactive pin while the active one is silent -> the receiver is on the other pin
+static void rxAutoPin() {
+  uint32_t now = millis();
+  int a = rxPin(), o = 3 - a;
+  uint32_t na = edgeN[a], no = edgeN[o];
+  if (no - rxSeen[o] >= 12 && na == rxSeen[a] && now - edgeT[o] < 400) {
+    rxSwitch(o);
+    char b[40]; snprintf(b, sizeof(b), "IR RECEIVER FOUND ON G%d", o); toast(b, 1600);
+    return;
+  }
+  if (now - edgeT[o] > 1500) rxSeen[o] = no;  // forget old noise
+  rxSeen[a] = na;
+}
+// copy the last frame as microseconds (marks/spaces), for remotes IRremote can't decode
+static void rxRaw(std::vector<uint16_t>& out) {
+  out.clear();
+  auto& ip = IrReceiver.irparams;
+  int n = std::min<int>(ip.rawlen, 401);
+  for (int i = 1; i < n; i++) {
+    int us = ip.rawbuf[i] * MICROS_PER_TICK;
+    us += (i & 1) ? -MARK_EXCESS_MICROS : MARK_EXCESS_MICROS;
+    out.push_back((uint16_t)constrain(us, 1, 65000));
+  }
+  if (!(out.size() & 1) && out.size()) out.pop_back();  // must end on a mark
+}
+static String irDesc(const IRData& d, int rawN) {
+  char b[48];
+  if (d.protocol == UNKNOWN) snprintf(b, sizeof(b), "UNKNOWN  RAW %d", rawN);
+  else snprintf(b, sizeof(b), "%s A%X C%X %dB", getProtocolString(d.protocol), d.address, d.command, d.numberOfBits);
+  return String(b);
+}
+
+// RECEIVE screen: live capture list
+struct Capture { IRData d; std::vector<uint16_t> raw; uint32_t t; int reps; };
+static std::vector<Capture> caps;
+static bool scanning = false;
 
 // ---- macros: /ir/macros.txt   NAME: SAMSUNG POWER, WAIT 2000, LG VOL+ x5
 struct Macro { String name; std::vector<String> steps; };
@@ -155,29 +247,83 @@ static void macroStep() {
   runAt = millis() + 180;
 }
 
-// called every frame from loop(): finishes learn mode
+// called every frame from loop(): learn mode + receive screen
 void irTick() {
   macroStep();
-  if (!learning) return;
-  if (millis() > learnUntil) { learning = false; IrReceiver.stop(); toast("LEARN TIMED OUT"); return; }
-  if (IrReceiver.decode()) {
-    IRData d = IrReceiver.decodedIRData;
-    IrReceiver.resume();
-    if (d.protocol == UNKNOWN || (d.flags & IRDATA_FLAGS_IS_REPEAT)) return;
-    learned[learnSlot].set = true;
-    learned[learnSlot].d = d;
-    learned[learnSlot].d.flags = 0;
+  if (!learning && !scanning) return;
+  rxAutoPin();
+  if (learning && millis() > learnUntil) { learning = false; if (!scanning) rxStop(); toast("LEARN TIMED OUT - TRY IR > RECEIVE", 1800); return; }
+  if (!IrReceiver.decode()) return;
+  IRData d = IrReceiver.decodedIRData;
+  std::vector<uint16_t> raw;
+  rxRaw(raw);
+  IrReceiver.resume();
+  if (millis() < rxIgnoreUntil) return;  // our own IR LED
+  bool rep = d.flags & IRDATA_FLAGS_IS_REPEAT;
+  if (d.protocol == UNKNOWN && raw.size() < 7) return;  // noise
+  if (learning) {
+    if (rep) return;
+    Learned& L = learned[learnSlot];
+    L.set = true; L.d = d; L.d.flags = 0;
+    if (d.protocol == UNKNOWN) L.raw = raw; else L.raw.clear();
     saveLearned();
-    char b[48];
-    snprintf(b, sizeof(b), "%s A%X C%X", getProtocolString(d.protocol), d.address, d.command);
-    lastInfo = b;
+    lastInfo = irDesc(d, raw.size());
     learning = false;
-    IrReceiver.stop();
+    if (!scanning) rxStop();
     Audio::blip(1500, 60, Audio::W_SINE);
     toast("LEARNED!");
+    return;
   }
+  // receive screen: repeats of the same button just bump a counter
+  if (caps.size() && millis() - caps[0].t < 600 &&
+      (rep || (d.protocol == caps[0].d.protocol && d.address == caps[0].d.address && d.command == caps[0].d.command && d.protocol != UNKNOWN))) {
+    caps[0].reps++; caps[0].t = millis(); return;
+  }
+  if (rep) return;
+  caps.insert(caps.begin(), Capture{d, raw, millis(), 1});
+  if (caps.size() > 6) caps.pop_back();
+  Audio::blip(1700, 25, Audio::W_SINE, 0.3f);
 }
 
+static bool saveCapture(const Capture& c) {  // append to /ir/captured.ir (Flipper format) -> shows up in .IR FILES
+  if (!sdOK) return false;
+  File f = SD.open("/ir/captured.ir", SD.exists("/ir/captured.ir") ? FILE_APPEND : FILE_WRITE);
+  if (!f) return false;
+  if (f.size() == 0) f.print("Filetype: IR signals file\nVersion: 1\n");
+  static int n = 0;
+  if (!n) n = millis() % 900 + 1;
+  f.printf("#\nname: CAP_%d\n", n++);
+  const IRData& d = c.d;
+  const char* fp = nullptr;
+  uint32_t a = d.address, cm = d.command;
+  switch (d.protocol) {
+    case NEC: fp = a > 0xFF ? "NECext" : "NEC"; break;
+    case SAMSUNG: fp = "Samsung32"; a &= 0xFF; break;
+    case SONY: fp = d.numberOfBits >= 20 ? "SIRC20" : d.numberOfBits >= 15 ? "SIRC15" : "SIRC"; break;
+    case RC5: fp = "RC5"; break;
+    case RC6: fp = "RC6"; break;
+    default: break;
+  }
+  if (fp && strcmp(fp, "NECext") == 0) cm = (cm & 0xFF) | ((~cm & 0xFF) << 8);
+  if (fp) {
+    f.printf("type: parsed\nprotocol: %s\naddress: %02X %02X 00 00\ncommand: %02X %02X 00 00\n", fp, (unsigned)(a & 0xFF), (unsigned)(a >> 8 & 0xFF),
+             (unsigned)(cm & 0xFF), (unsigned)(cm >> 8 & 0xFF));
+  } else {
+    // unknown, or a protocol the Flipper format has no name for: store the timings
+    f.print("type: raw\nfrequency: 38000\nduty_cycle: 0.330000\ndata:");
+    for (auto t : c.raw) f.printf(" %u", t);
+    f.print("\n");
+  }
+  f.close();
+  return true;
+}
+static void sendCapture(const Capture& c) {
+  rxIgnoreUntil = millis() + 250;
+  if (c.d.protocol == UNKNOWN) IrSender.sendRaw(c.raw.data(), c.raw.size(), 38);
+  else IrSender.write(const_cast<IRData*>(&c.d), 0);
+  lastInfo = irDesc(c.d, c.raw.size());
+  sentT = millis();
+}
 
 // ---- Flipper-style .ir files in /ir (e.g. from the open Flipper-IRDB collection)
 struct IrSig { String name, type, proto; uint32_t addr = 0, cmd = 0, freq = 38000; uint32_t dataPos = 0; };
@@ -295,24 +441,38 @@ struct IRApp : App {
     loadMacros();
   }
   void leave() override {
-    if (learning) { learning = false; IrReceiver.stop(); }
+    learning = false; scanning = false; rxStop();
+    caps.clear(); caps.shrink_to_fit();
     irSigs.clear(); irSigs.shrink_to_fit(); irFiles.clear(); irFiles.shrink_to_fit(); fileLevel = 0;
   }
   void send(int b) {
     if (brand == NBR && !learned[b].set) { toast("NOT LEARNED - PRESS L"); return; }
     sendCode(brand, b);
   }
-  int msel = 0, fsel = 0, fileLevel = 0, fileSel0 = 0;
+  int msel = 0, fsel = 0, fileLevel = 0, fileSel0 = 0, csel = 0;
   bool key(const KeyEv& e) override {
     KeyCode k = e.nav();
     if (!inRemote) {
-      if (k == K_UP) { brand = (brand + NBR + 2) % (NBR + 3); return true; }
-      if (k == K_DOWN) { brand = (brand + 1) % (NBR + 3); return true; }
+      if (k == K_UP) { brand = (brand + NBR + 3) % (NBR + 4); return true; }
+      if (k == K_DOWN) { brand = (brand + 1) % (NBR + 4); return true; }
       if (k == K_ENTER || k == K_RIGHT) {
         inRemote = true; btn = 0; msel = 0; fsel = 0; fileLevel = 0;
         if (brand == NBR + 2) scanIrFiles();
+        if (brand == NBR + 3) { scanning = true; csel = 0; rxStart(); }
         return true;
       }
+      return false;
+    }
+    if (brand == NBR + 3) {  // receive
+      int n = caps.size();
+      if (k == K_ESC || k == K_LEFT) { inRemote = false; scanning = false; if (!learning) rxStop(); return true; }
+      if (k == K_UP && n) { csel = (csel + n - 1) % n; return true; }
+      if (k == K_DOWN && n) { csel = (csel + 1) % n; return true; }
+      if (csel >= n) csel = 0;
+      if (k == K_ENTER && n) { sendCapture(caps[csel]); return true; }
+      if (e.is('s') && n) { toast(saveCapture(caps[csel]) ? "SAVED TO /IR/CAPTURED.IR" : "SAVE FAILED"); return true; }
+      if (e.is('g')) { rxSwitch(3 - rxPin()); char b[24]; snprintf(b, sizeof(b), "LISTENING ON G%d", rxPin()); toast(b); return true; }
+      if (e.is('x')) { caps.clear(); return true; }
       return false;
     }
     if (brand == NBR + 2) {  // .ir files
@@ -337,7 +497,7 @@ struct IRApp : App {
       if (e.code == K_CHAR && e.ch == ' ') { runMacro = -1; toast("MACRO STOPPED"); return true; }
       return false;
     }
-    if (k == K_ESC) { inRemote = false; if (learning) { learning = false; IrReceiver.stop(); } return true; }
+    if (k == K_ESC) { inRemote = false; if (learning) { learning = false; rxStop(); } return true; }
     int r = btn / 3, c = btn % 3;
     if (k == K_UP) { btn = ((r + 3) % 4) * 3 + c; return true; }
     if (k == K_DOWN) { btn = ((r + 1) % 4) * 3 + c; return true; }
@@ -356,8 +516,8 @@ struct IRApp : App {
       case 'o': send(7); return true;
       case 'l':
         if (brand != NBR) { toast("SELECT 'LEARNED' REMOTE"); return true; }
-        learnSlot = btn; learning = true; learnUntil = millis() + 10000;
-        IrReceiver.begin(cfg.irRx == 2 ? 2 : 1, false);
+        learnSlot = btn; learning = true; learnUntil = millis() + 15000;
+        rxStart();
         return true;
       case 'x':
         if (brand == NBR) { learned[btn].set = false; saveLearned(); toast("BUTTON CLEARED"); }
@@ -369,17 +529,49 @@ struct IRApp : App {
     background();
     statusBar("IR REMOTE", T.red);
     panel(3, 15, 84, 108, T.edge);
-    int total = NBR + 3, top = constrain(brand - 4, 0, std::max(0, total - 8));
+    int total = NBR + 4, top = constrain(brand - 4, 0, std::max(0, total - 8));
     for (int r = 0; r < 8 && top + r < total; r++) {
       int i = top + r, y = 18 + r * 13;
       bool s = i == brand;
       if (s) { cv.fillRect(5, y - 2, 80, 12, lerpc(T.panel, T.red, 0.25f)); frame(5, y - 2, 80, 12, inRemote ? T.red : T.white); }
-      const char* n = i == NBR ? "+ LEARNED" : (i == NBR + 1 ? "> MACROS" : (i == NBR + 2 ? "# .IR FILES" : BRANDS[i].n));
-      text(9, y, n, s ? T.white : (i >= NBR ? (i == NBR ? T.green : i == NBR + 1 ? T.purp : T.cyan) : T.grey), 1, s);
+      const char* n = i == NBR ? "+ LEARNED" : i == NBR + 1 ? "> MACROS" : i == NBR + 2 ? "# .IR FILES" : i == NBR + 3 ? "~ RECEIVE" : BRANDS[i].n;
+      text(9, y, n, s ? T.white : (i >= NBR ? (i == NBR ? T.green : i == NBR + 1 ? T.purp : i == NBR + 2 ? T.cyan : T.yel) : T.grey), 1, s);
       if (i < NBR && BRANDS[i].beta) cv.fillRect(80, y + 2, 2, 2, T.yel);
     }
     if (top > 0) cv.fillTriangle(42, 15, 46, 15, 44, 13, T.grey);
     if (top + 8 < total) cv.fillTriangle(42, 121, 46, 121, 44, 123, T.grey);
+    if (brand == NBR + 3) {
+      panel(91, 15, 146, 108, T.edge, T.bar);
+      uint32_t now = millis();
+      for (int p = 1; p <= 2; p++) {  // activity lamps for both Grove signal pins
+        int x = 96 + (p - 1) * 46;
+        bool act = rxOn && now - edgeT[p] < 120;
+        cv.fillCircle(x + 3, 22, 3, act ? T.green : T.dim);
+        char b[8]; snprintf(b, sizeof(b), "G%d", p);
+        text(x + 9, 19, b, rxOn && p == rxPin() ? T.white : T.dim, 1, false);
+      }
+      if (rxOn) text(190, 19, "LIVE", (now / 400) % 2 ? T.yel : T.grey, 1, false);
+      int n = caps.size();
+      if (!n) {
+        text(96, 36, rxOn ? "POINT A REMOTE HERE" : "OK = START LISTENING", T.white, 1, false);
+        text(96, 48, "AND PRESS A BUTTON", T.white, 1, false);
+        text(96, 64, "GROVE: RED 5V BLACK GND", T.dim, 1, false);
+        text(96, 74, "SIGNAL ON G1 OR G2", T.dim, 1, false);
+        text(96, 84, "(PIN FOUND BY ITSELF)", T.dim, 1, false);
+      }
+      for (int r = 0; r < n && r < 6; r++) {
+        int y = 32 + r * 12;
+        bool s = inRemote && r == csel;
+        if (s) { cv.fillRect(93, y - 2, 142, 11, lerpc(T.panel, T.yel, 0.25f)); frame(93, y - 2, 142, 11, T.yel); }
+        String l = irDesc(caps[r].d, caps[r].raw.size());
+        if (caps[r].reps > 1) l += " x" + String(caps[r].reps);
+        textFit(97, y, l.c_str(), s ? T.white : (r == 0 && now - caps[0].t < 300 ? T.yel : T.grey), 136, false);
+      }
+      if (lastInfo.length() && now - sentT < 1500) { text(96, 106, "TX )))", T.red, 1, false); textFit(134, 106, lastInfo.c_str(), T.grey, 100, false); }
+      if (inRemote) hintBar({{"OK", "RESEND"}, {"S", "SAVE .IR"}, {"G", "PIN"}, {"X", "CLEAR"}});
+      else hintBar({{"^v", "BRAND"}, {"OK", "OPEN"}, {"ESC", "BACK"}});
+      return;
+    }
     if (brand == NBR + 2) {
       panel(91, 15, 146, 108, T.edge, T.bar);
       bool lvl = fileLevel == 1;
@@ -432,7 +624,7 @@ struct IRApp : App {
     }
     if (learning) {
       int left = (learnUntil - millis()) / 1000 + 1;
-      char b[40]; snprintf(b, sizeof(b), "AIM AT GROVE G%d... %ds", cfg.irRx, left);
+      char b[40]; snprintf(b, sizeof(b), "PRESS REMOTE NOW %ds G%d", left, rxPin());
       text(96, 100, b, (millis() / 300) % 2 ? T.green : T.white, 1, false);
     } else if (lastInfo.length()) {
       text(96, 100, flash ? "TX )))" : "TX", T.red, 1, false);
