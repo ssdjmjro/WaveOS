@@ -443,22 +443,39 @@ static void drawBootFrame(float t) {
 }
 void libScanStart();
 static void bootAnim() {
+  // Smooth version: the picture is decoded ONCE into the frame buffer; each frame only sends the
+  // newly revealed columns (and later only the title rows) to the screen, instead of re-decoding
+  // and re-sending the whole 240x135 image every frame.
   const uint8_t chime[4] = {72, 76, 79, 84};
+  const uint16_t BG = RGB(2, 4, 10);
+  auto& D = M5Cardputer.Display;
+  cv.drawJpg(BOOT_JPG, sizeof(BOOT_JPG), 0, 0);
+  D.fillScreen(BG);
   uint32_t t0 = millis();
-  int ni = 0;
-  bool still = false;
-  while (millis() - t0 < 1500) {
-    float t = (millis() - t0) / 1100.f;
-    if (t > 1.2f && still) { delay(16); continue; }  // logo complete: hold the image, no more transfers
-    still = t > 1.2f;
-    drawBootFrame(t);
-    if (cfg.bootSound && ni < 4 && millis() - t0 > 200 + ni * 130) { Audio::blip(440.f * powf(2.f, (chime[ni] - 69) / 12.f), 110, Audio::W_TRI, 0.35f); ni++; }
-    cv.pushSprite(0, 0);
-    delay(16);
+  int ni = 0, shown = 0;
+  const uint32_t REVEAL = 900, DUR = 1650;
+  while (millis() - t0 < DUR) {
+    uint32_t el = millis() - t0;
+    int rx = std::min(240, (int)(240 * el / REVEAL));
+    if (rx > shown) {  // push only the new strip
+      D.setClipRect(shown, 0, rx - shown, 135);
+      cv.pushSprite(0, 0);
+      D.clearClipRect();
+      shown = rx;
+    }
+    float a = constrain((el - 550.f) / 450.f, 0.f, 1.f);  // title fades in (drawn over itself, getting brighter)
+    if (a > 0) {
+      textC(120, 100, FW_NAME, lerpc(BG, RGB(235, 242, 255), a), 2, false);
+      textC(120, 119, "CARDPUTER ADV  V" FW_VER, lerpc(BG, RGB(110, 124, 150), a), 1, false);
+      int x0 = std::min(shown, 240);
+      if (x0 > 0) { D.setClipRect(0, 98, x0, 30); cv.pushSprite(0, 0); D.clearClipRect(); }
+    }
+    if (cfg.bootSound && ni < 4 && el > 200 + ni * 130) { Audio::blip(440.f * powf(2.f, (chime[ni] - 69) / 12.f), 110, Audio::W_TRI, 0.35f); ni++; }
+    delay(12);
   }
-  M5Cardputer.Display.waitDisplay();  // let the last frame finish before anything else touches the bus
+  D.waitDisplay();  // let the last frame finish before anything else touches the bus
   // fade the backlight out: the boot -> home switch then happens in the dark (no tearing flash)
-  for (int i = 8; i >= 0; i--) { M5Cardputer.Display.setBrightness(cfg.bright * i / 8); delay(18); }
+  for (int i = 8; i >= 0; i--) { D.setBrightness(cfg.bright * i / 8); delay(18); }
 }
 
 // ------------------------------------------------------------------ screensaver / sleep
