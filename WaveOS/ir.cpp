@@ -337,12 +337,10 @@ static void listIrDir(const String& dir) {
   File d = SD.open(dir);
   if (!d) return;
   for (;;) {
-    File f = d.openNextFile();
-    if (!f) break;
-    String n = f.name();
+    bool isDir = false;
+    String n = d.getNextFileName(&isDir);   // name only: much faster than opening every entry
+    if (!n.length()) break;
     int sl = n.lastIndexOf('/'); if (sl >= 0) n = n.substring(sl + 1);
-    bool isDir = f.isDirectory();
-    f.close();
     if (n.startsWith(".")) continue;
     String l = n; l.toLowerCase();
     if (!isDir && !l.endsWith(".ir")) continue;
@@ -506,12 +504,10 @@ static void scanCollect(const String& dir, const String& rel, int depth) {
   File d = SD.open(dir);
   if (!d) return;
   while (scanList.size() < 500) {
-    File f = d.openNextFile();
-    if (!f) break;
-    String n = f.name();
+    bool isDir = false;
+    String n = d.getNextFileName(&isDir);   // name only: much faster than opening every entry
+    if (!n.length()) break;
     int sl = n.lastIndexOf('/'); if (sl >= 0) n = n.substring(sl + 1);
-    bool isDir = f.isDirectory();
-    f.close();
     if (n.startsWith(".")) continue;
     String l = n; l.toLowerCase();
     if (isDir) { if (depth > 0) scanCollect(dir + "/" + n, rel + n + "/", depth - 1); }
@@ -600,13 +596,11 @@ static void ixStep() {
       ixStack.push_back("\x01" + rel);  // marker: remember the folder we are reading
       continue;
     }
-    File f = ixDir.openNextFile();
+    bool dir = false;
+    String n = ixDir.getNextFileName(&dir);
     String rel = ixStack.back().substring(1);
-    if (!f) { ixDir.close(); ixStack.pop_back(); continue; }
-    String n = f.name();
+    if (!n.length()) { ixDir.close(); ixStack.pop_back(); continue; }
     int sl = n.lastIndexOf('/'); if (sl >= 0) n = n.substring(sl + 1);
-    bool dir = f.isDirectory();
-    f.close();
     if (n.startsWith(".") || n.startsWith("_index")) continue;
     if (dir) { ixStack.insert(ixStack.end() - 1, rel + n + "/"); continue; }
     String l = n; l.toLowerCase();
