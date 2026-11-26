@@ -522,12 +522,114 @@ static void scanCollect(const String& dir, const String& rel, int depth) {
 static int sendAllIdx = -1;   // A in a file: every signal in turn
 static uint32_t sendAllT = 0;
 
+
+// ---- SEARCH: /ir/_index.txt holds one relative path per .ir file; typed words are matched (all of them, any case)
+// The index is read in chunks from tick() so the screen keeps running; R rebuilds it on the device.
+static const char* IR_INDEX = "/ir/_index.txt";
+static bool srch = false, srchBusy = false, srchDirty = false, srchNoIndex = false;
+static String srchQ;
+static std::vector<String> srchRes;
+static int srchTotal = 0, srchSel = 0;
+static uint32_t srchEditT = 0;
+static File srchF;
+static char srchTerms[4][24]; static int srchNT = 0;
+static char srchLine[200]; static int srchLL = 0;
+static void srchLineDone() {
+  srchLine[srchLL] = 0;
+  if (srchLL) {
+    char low[200];
+    for (int i = 0; i <= srchLL; i++) low[i] = tolower((unsigned char)srchLine[i]);
+    bool ok = true;
+    for (int t = 0; t < srchNT && ok; t++) ok = strstr(low, srchTerms[t]) != nullptr;
+    if (ok) { srchTotal++; if (srchRes.size() < 120) srchRes.push_back(String(srchLine)); }
+  }
+  srchLL = 0;
+}
+static void srchStart() {
+  if (srchF) srchF.close();
+  srchRes.clear(); srchTotal = 0; srchSel = 0; srchLL = 0; srchBusy = false; srchNT = 0;
+  String q = srchQ; q.toLowerCase(); q.trim();
+  while (q.length() && srchNT < 4) {   // split into words
+    int sp = q.indexOf(' ');
+    String w = sp < 0 ? q : q.substring(0, sp);
+    q = sp < 0 ? "" : q.substring(sp + 1); q.trim();
+    if (w.length()) { strncpy(srchTerms[srchNT], w.c_str(), 23); srchTerms[srchNT][23] = 0; srchNT++; }
+  }
+  if (!srchNT) return;
+  srchF = SD.open(IR_INDEX);
+  srchNoIndex = !srchF;
+  srchBusy = (bool)srchF;
+}
+static void srchStep() {  // ~16 KB per frame
+  static uint8_t buf[2048];
+  for (int k = 0; k < 8 && srchBusy; k++) {
+    int n = srchF.read(buf, sizeof(buf));
+    if (n <= 0) { srchLineDone(); srchF.close(); srchBusy = false; break; }
+    for (int i = 0; i < n; i++) {
+      char c = buf[i];
+      if (c == '\n') srchLineDone();
+      else if (c != '\r' && srchLL < (int)sizeof(srchLine) - 1) srchLine[srchLL++] = c;
+    }
+  }
+}
+// index rebuild: walks /ir a few entries per frame
+static bool ixBusy = false;
+static int ixCount = 0;
+static std::vector<String> ixStack;
+static File ixDir, ixOut;
+static void ixStart() {
+  if (ixBusy) return;
+  ixStack.clear(); ixStack.push_back(""); ixCount = 0;
+  SD.remove("/ir/_index.tmp");
+  ixOut = SD.open("/ir/_index.tmp", FILE_WRITE);
+  ixBusy = (bool)ixOut;
+}
+static void ixStep() {
+  uint32_t t0 = millis();
+  while (ixBusy && millis() - t0 < 25) {
+    if (!ixDir) {
+      if (ixStack.empty()) {  // done: swap the new index in
+        ixOut.close(); SD.remove(IR_INDEX); SD.rename("/ir/_index.tmp", IR_INDEX);
+        ixBusy = false; ixStack.shrink_to_fit(); srchNoIndex = false; srchDirty = true; srchEditT = 0;
+        char b[32]; snprintf(b, sizeof(b), "INDEX: %d REMOTES", ixCount); toast(b, 1800);
+        return;
+      }
+      String rel = ixStack.back(); ixStack.pop_back();
+      ixDir = SD.open(rel.length() ? "/ir/" + rel.substring(0, rel.length() - 1) : String("/ir"));
+      if (!ixDir) continue;
+      ixStack.push_back("\x01" + rel);  // marker: remember the folder we are reading
+      continue;
+    }
+    File f = ixDir.openNextFile();
+    String rel = ixStack.back().substring(1);
+    if (!f) { ixDir.close(); ixStack.pop_back(); continue; }
+    String n = f.name();
+    int sl = n.lastIndexOf('/'); if (sl >= 0) n = n.substring(sl + 1);
+    bool dir = f.isDirectory();
+    f.close();
+    if (n.startsWith(".") || n.startsWith("_index")) continue;
+    if (dir) { ixStack.insert(ixStack.end() - 1, rel + n + "/"); continue; }
+    String l = n; l.toLowerCase();
+    if (l.endsWith(".ir")) { ixOut.print(rel); ixOut.print(n); ixOut.print('\n'); ixCount++; }
+  }
+}
+static String srchLabel(const String& rel) {  // "TVs/Samsung/AA59.ir" -> "SAMSUNG AA59"
+  String r = rel; r.replace(".ir", ""); r.replace(".IR", "");
+  int a = r.lastIndexOf('/'), b = a > 0 ? r.lastIndexOf('/', a - 1) : -1;
+  String brand = a > 0 ? r.substring(b + 1, a) : "", file = r.substring(a + 1);
+  String fl = file; fl.toLowerCase(); String bl = brand; bl.toLowerCase();
+  String out = (brand.length() && !fl.startsWith(bl)) ? brand + " " + file : file;
+  out.replace("_", " "); out.toUpperCase();
+  return out;
+}
+
 struct IRApp : App {
   int brand = 0;   // NBR = learned remote
   int btn = 0;
   bool inRemote = false;
   IRApp() { name = "IR"; }
-  bool ownsPlusMinus() override { return inRemote && brand <= NBR; }  // TV VOL+/VOL-
+  bool wantsAllKeys() override { return srch && inRemote && brand == NBR + 2; }  // typing a search
+  bool ownsPlusMinus() override { return (inRemote && brand <= NBR) || wantsAllKeys(); }  // TV VOL+/VOL-
   void enter() override {
     if (!txReady) { IrSender.begin(IR_TX); txReady = true; loadLearned(); }
     loadMacros();
@@ -537,6 +639,8 @@ struct IRApp : App {
     caps.clear(); caps.shrink_to_fit();
     irSigs.clear(); irSigs.shrink_to_fit(); irFiles.clear(); irFiles.shrink_to_fit(); fileLevel = 0;
     scanList.clear(); scanList.shrink_to_fit(); scanIdx = -1; sendAllIdx = -1;
+    if (srchF) srchF.close();
+    srchBusy = false; srchRes.clear(); srchRes.shrink_to_fit(); srch = false;
   }
   void send(int b) {
     if (brand == NBR && !learned[b].set) { toast("NOT LEARNED - PRESS L"); return; }
@@ -544,6 +648,9 @@ struct IRApp : App {
   }
   int msel = 0, fsel = 0, fileLevel = 0, fileSel0 = 0, csel = 0;
   void tick() override {
+    if (ixBusy) ixStep();
+    if (srchDirty && millis() - srchEditT > 250) { srchDirty = false; srchStart(); }
+    if (srchBusy) srchStep();
     if (scanIdx >= 0 && millis() - scanT > 1100) {  // power scan: one file per ~1.1s
       scanT = millis();
       while (scanIdx < (int)scanList.size()) {
@@ -570,6 +677,10 @@ struct IRApp : App {
     if (!inRemote) {
       if (k == K_UP) { brand = (brand + NBR + 3) % (NBR + 4); return true; }
       if (k == K_DOWN) { brand = (brand + 1) % (NBR + 4); return true; }
+      if (e.is('f')) {  // search remotes from anywhere in the list
+        brand = NBR + 2; inRemote = true; fsel = 0; fileLevel = 0; irDir = "/ir"; listIrDir(irDir);
+        srch = true; return true;
+      }
       if (k == K_ENTER || k == K_RIGHT) {
         inRemote = true; btn = 0; msel = 0; fsel = 0; fileLevel = 0;
         if (brand == NBR + 2) { irDir = "/ir"; listIrDir(irDir); }
@@ -589,6 +700,28 @@ struct IRApp : App {
       if (e.is('g')) { rxSwitch(3 - rxPin()); char b[24]; snprintf(b, sizeof(b), "LISTENING ON G%d", rxPin()); toast(b); return true; }
       if (e.is('x')) { caps.clear(); return true; }
       return false;
+    }
+    if (brand == NBR + 2 && srch) {  // search mode: type words, Fn+arrows pick, OK opens
+      int n = srchRes.size();
+      KeyCode kf = e.navFn();
+      if (e.code == K_ESC) { if (srchQ.length()) { srchQ = ""; srchRes.clear(); srchTotal = 0; srchDirty = false; } else srch = false; return true; }
+      if ((kf == K_UP || (e.code == K_TAB && e.shift)) && n) { srchSel = (srchSel + n - 1) % n; return true; }
+      if ((kf == K_DOWN || e.code == K_TAB) && n) { srchSel = (srchSel + 1) % n; return true; }
+      if (e.code == K_ENTER) {
+        if (!n) return true;
+        String path = "/ir/" + srchRes[srchSel];
+        int sl = path.lastIndexOf('/');
+        irDir = path.substring(0, sl); listIrDir(irDir);
+        String fn = path.substring(sl + 1);
+        fsel = 0; for (int i = 0; i < (int)irFiles.size(); i++) if (irFiles[i] == fn) fsel = i;
+        if (openIrFile(path)) { fileSel0 = fsel; fileLevel = 1; fsel = 0; srch = false; for (int i = 0; i < (int)irSigs.size(); i++) if (isPowerName(irSigs[i].name)) { fsel = i; break; } }
+        else toast("CAN'T OPEN FILE");
+        return true;
+      }
+      if (e.code == K_BACK) { if (srchQ.length()) { srchQ.remove(srchQ.length() - 1); srchDirty = true; srchEditT = millis(); } return true; }
+      if (e.code == K_CHAR && e.fn && tolower(e.ch) == 'r') { ixStart(); toast("REBUILDING INDEX..."); return true; }
+      if (e.code == K_CHAR && !e.fn && srchQ.length() < 24) { srchQ += e.ch; srchDirty = true; srchEditT = millis(); return true; }
+      return true;
     }
     if (brand == NBR + 2) {  // .ir files: folder browser
       if (scanIdx >= 0) {  // power scan running
@@ -638,6 +771,7 @@ struct IRApp : App {
         return true;
       }
       if (e.is('a') && fileLevel == 1 && n) { sendAllIdx = 0; sendAllT = 0; return true; }
+      if (e.is('f') && fileLevel == 0) { srch = true; return true; }
       return false;
     }
     if (brand == NBR + 1) {  // macros
@@ -735,7 +869,7 @@ struct IRApp : App {
         }
       }
       if (inRemote) hintBar({{"OK", "RESEND"}, {"S", "SAVE .IR"}, {"G", "PIN"}, {"X", "CLEAR"}});
-      else hintBar({{"^v", "BRAND"}, {"OK", "OPEN"}, {"ESC", "BACK"}});
+      else hintBar({{"^v", "BRAND"}, {"OK", "OPEN"}, {"F", "FIND REMOTE"}, {"ESC", "BACK"}});
       return;
     }
     if (brand == NBR + 2) {
@@ -744,6 +878,35 @@ struct IRApp : App {
       String hdr = lvl ? irFileOpen.substring(irFileOpen.lastIndexOf('/') + 1) : irDir.substring(1) + "/";
       hdr.toUpperCase(); hdr.replace(".IR", "");
       textFit(96, 19, hdr.c_str(), T.grey, 136, false);
+      if (srch && inRemote) {  // search screen
+        cv.fillRect(92, 16, 144, 14, T.bar);
+        panel(93, 16, 142, 14, T.cyan, T.bg1);
+        String q = srchQ; q.toUpperCase();
+        if (!q.length()) text(105, 20, "BRAND / MODEL / TYPE", T.dim, 1, false);
+        int ex = text(98, 20, q.c_str(), T.white, 1, false);
+        if ((millis() / 400) % 2) text(q.length() ? ex : 98, 20, "_", T.cyan, 1, false);
+        char b[40];
+        if (ixBusy) snprintf(b, sizeof(b), "INDEXING... %d", ixCount);
+        else if (srchNoIndex) snprintf(b, sizeof(b), "NO INDEX - PRESS FN+R");
+        else if (srchBusy || srchDirty) snprintf(b, sizeof(b), "SEARCHING... %d", srchTotal);
+        else if (!srchNT || !srchQ.length()) snprintf(b, sizeof(b), "E.G. SAMSUNG TV");
+        else snprintf(b, sizeof(b), srchTotal > (int)srchRes.size() ? "%d FOUND (FIRST %d)" : "%d FOUND", srchTotal, (int)srchRes.size());
+        text(96, 33, b, ixBusy || srchBusy ? T.yel : T.grey, 1, false);
+        int n = srchRes.size(), tp = std::max(0, srchSel - 4);
+        for (int r = 0; r < 5 && tp + r < n; r++) {
+          int i = tp + r, y = 44 + r * 11;
+          bool s = i == srchSel;
+          if (s) { cv.fillRect(93, y - 2, 142, 11, lerpc(T.panel, T.cyan, 0.25f)); frame(93, y - 2, 142, 11, T.cyan); }
+          textFit(98, y, srchLabel(srchRes[i]).c_str(), s ? T.white : T.grey, 132, false);
+        }
+        if (n > 5) { int h = std::max(5, 55 * 5 / n), y = 42 + (55 - h) * srchSel / std::max(1, n - 1); cv.fillRect(234, 42, 1, 55, T.dim); cv.fillRect(233, y, 3, h, T.cyan); }
+        if (n && srchSel < n) {  // where it lives: category / brand
+          String w = srchRes[srchSel]; w = w.substring(0, std::max(0, w.lastIndexOf('/'))); w.replace("_", " "); w.toUpperCase();
+          textFit(96, 101, w.c_str(), T.dim, 136, false);
+        }
+        hintBar({{"FN^v", "PICK"}, {"OK", "OPEN"}, {"FN+R", "REINDEX"}, {"ESC", "BACK"}});
+        return;
+      }
       if (scanIdx >= 0) {  // power scan screen
         char b[40];
         int tot = scanList.size(), at = std::min(scanIdx, tot);
@@ -779,10 +942,10 @@ struct IRApp : App {
       if (!lvl && irMore) { char b[24]; snprintf(b, sizeof(b), "+%d NOT SHOWN", irMore); text(96, 100, b, T.dim, 1, false); }
       if (lastInfo.length() && lvl) { text(96, 100, millis() - sentT < 200 ? "TX )))" : "TX", T.red, 1, false); textFit(134, 100, lastInfo.c_str(), T.grey, 100, false); }
       if (sendAllIdx >= 0) { char b[24]; snprintf(b, sizeof(b), "SENDING ALL %d/%d", sendAllIdx, n); text(96, 111, b, T.yel, 1, false); }
-      if (!inRemote) hintBar({{"^v", "BRAND"}, {"OK", "OPEN"}, {"ESC", "BACK"}});
+      if (!inRemote) hintBar({{"^v", "BRAND"}, {"OK", "OPEN"}, {"F", "FIND REMOTE"}, {"ESC", "BACK"}});
       else if (sendAllIdx >= 0) hintBar({{"SPC", "STOP"}});
       else if (lvl) hintBar({{"OK", "SEND"}, {"A", "SEND ALL"}, {"[]", "PAGE"}, {"ESC", "BACK"}});
-      else hintBar({{"OK", "OPEN"}, {"P", "POWER SCAN"}, {"[]", "PAGE"}, {"ESC", "UP"}});
+      else hintBar({{"OK", "OPEN"}, {"F", "FIND"}, {"P", "POWER SCAN"}, {"[]", "PAGE"}, {"ESC", "UP"}});
       return;
     }
     if (brand == NBR + 1) {
@@ -796,7 +959,7 @@ struct IRApp : App {
       }
       if (runMacro >= 0) text(96, 112, "RUNNING...", T.green, 1, false);
       if (inRemote) hintBar({{"^v", "MACRO"}, {"OK", "RUN"}, {"SPC", "STOP"}, {"R", "RELOAD"}});
-      else hintBar({{"^v", "BRAND"}, {"OK", "OPEN"}, {"ESC", "BACK"}});
+      else hintBar({{"^v", "BRAND"}, {"OK", "OPEN"}, {"F", "FIND REMOTE"}, {"ESC", "BACK"}});
       return;
     }
     // remote body
@@ -825,7 +988,7 @@ struct IRApp : App {
     }
     text(96, 111, brand == NBR ? "L=LEARN X=CLEAR" : "P I M +- [] O", T.dim, 1, false);
     if (inRemote) hintBar({{"<>^v", "BUTTON"}, {"OK", "SEND"}, {"L", "LEARN"}, {"ESC", "BRANDS"}});
-    else hintBar({{"^v", "BRAND"}, {"OK", "OPEN"}, {"ESC", "BACK"}});
+    else hintBar({{"^v", "BRAND"}, {"OK", "OPEN"}, {"F", "FIND REMOTE"}, {"ESC", "BACK"}});
   }
 };
 
