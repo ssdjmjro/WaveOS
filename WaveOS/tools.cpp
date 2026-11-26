@@ -330,7 +330,7 @@ struct GraphApp : App {
       int px = (int)((gx - xmin) / span * (GW - 1));
       String s = Expr::fmt(gx);
       int ly = constrain(oy + 3, GY + 2, GY + GH - 9);
-      if (s.length() < 6) text(px - textW(s.c_str()) / 2, ly, s.c_str(), T.dim, 1, false);
+      if (s.length() < 6) text(constrain(px - textW(s.c_str()) / 2, 1, GW - 1 - textW(s.c_str())), ly, s.c_str(), T.dim, 1, false);
     }
     // curves
     uint16_t cols[2] = {T.yel, T.cyan};

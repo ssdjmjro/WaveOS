@@ -1,5 +1,8 @@
 // WAVE OS - pixel-art drawing helpers (240x135, built-in 5x7 GLCD font)
 #include "common.h"
+#ifdef CLIP_LOG
+bool clipQuiet = false;  // set while drawing scrolling menus (cards slide off-screen on purpose)
+#endif
 #include "audio.h"
 #include <Preferences.h>
 
@@ -67,6 +70,15 @@ int text(int x, int y, const char* s, uint16_t c, int sc, bool sh) {
   if (sh) { cv.setTextColor(T.bg0); cv.drawString(s, x + 1, y + 1); }
   cv.setTextColor(c);
   cv.drawString(s, x, y);
+#ifdef CLIP_LOG
+  extern bool clipQuiet;
+  if (!clipQuiet && (x < 0 || x + textW(s, sc) > 240)) {  // dev: log text that runs off the screen (once per string)
+    static uint32_t seen[256]; static int ns = 0;
+    uint32_t h = 2166136261u; for (const char* p = s; *p; p++) h = (h ^ (uint8_t)*p) * 16777619u;
+    bool dup = false; for (int i = 0; i < ns; i++) dup |= seen[i] == h;
+    if (!dup) { if (ns < 256) seen[ns++] = h; Serial.printf("[clip] x=%d w=%d '%s'\n", x, textW(s, sc), s); }
+  }
+#endif
   return x + textW(s, sc) + sc;
 }
 void textC(int cx, int y, const char* s, uint16_t c, int sc, bool sh) { text(cx - textW(s, sc) / 2, y, s, c, sc, sh); }
@@ -291,7 +303,11 @@ void statusBar(const char* title, uint16_t accent) {
     uint16_t base = lerpc(T.cyanD, T.purpD, x / 240.f);
     cv.drawPixel(x, 11, (mus && x < prog * 240) ? gradc(x / 240.f) : base);
   }
-  text(4, 2, title, accent);
+  {
+    char pb[8]; snprintf(pb, sizeof(pb), "%d%%", constrain(Batt::pct, 0, 100));
+    int lim = 218 - 10 - textW(pb) - 22 - (mus && !Music::paused() ? 14 : 4) - 4;
+    textFit(4, 2, title, accent, lim);
+  }
   String clk = clockString();
   if (clk.length() && textW(title) < 100) text(118, 2, clk.c_str(), T.white, 1, false);
   Batt::tick();
@@ -333,16 +349,24 @@ void statusBar(const char* title, uint16_t accent) {
 }
 void hintBar(std::initializer_list<Hint> h) {
   cv.fillRect(0, 125, 240, 10, T.bar);
+  // squeeze the spacing when the hints would not fit (keys, then gaps get tighter)
+  int pad = 4, kg = 3, gap = 5;
+  for (int pass = 0; pass < 4; pass++) {
+    int w = 3;
+    for (auto& it : h) w += (it.k && *it.k ? textW(it.k) + pad + kg : 0) + textW(it.l) + 1 + gap;
+    if (w - gap <= 238) break;
+    if (pass == 0) { kg = 2; gap = 3; } else if (pass == 1) { kg = 1; gap = 2; } else { pad = 2; }
+  }
   int x = 3;
   for (auto& it : h) {
     if (x > 230) break;
     if (it.k && *it.k) {
-      int w = textW(it.k) + 4;
+      int w = textW(it.k) + pad;
       cv.fillRect(x, 126, w, 9, T.edge);
-      text(x + 2, 127, it.k, T.white, 1, false);
-      x += w + 3;
+      text(x + pad / 2, 127, it.k, T.white, 1, false);
+      x += w + kg;
     }
-    x = text(x, 127, it.l, T.grey, 1, false) + 5;
+    x = text(x, 127, it.l, T.grey, 1, false) + gap;
   }
 }
 
@@ -441,26 +465,47 @@ void drawToast() {
   text(x + 7, 104, toastMsg, T.white);
 }
 void helpOverlay(const char* title, std::initializer_list<const char*> lines) {
-  cv.fillRect(8, 14, 224, 108, lerpc(T.bg0, T.panel, 0.6f));
-  panel(8, 14, 224, 108, T.cyan, T.bg1);
+  cv.fillRect(8, 14, 224, 110, lerpc(T.bg0, T.panel, 0.6f));
+  panel(8, 14, 224, 110, T.cyan, T.bg1);
   text(14, 18, title, T.cyan);
-  int n = lines.size(), per = 18, pages = (n + per - 1) / per;
-  int page = pages > 1 ? (millis() / 3500) % pages : 0;
-  if (pages > 1) { char b[8]; snprintf(b, sizeof(b), "%d/%d", page + 1, pages); text(200, 18, b, T.dim, 1, false); }
-  int i = 0, y = 30, x = 14;
-  for (auto l : lines) {
-    if (i++ / per != page) continue;
-    if (y > 105) { y = 30; x = 124; }
+  // "KEY  what it does" lines; two columns when every line fits, else one column with more pages
+  auto split = [](const char* l, char* k) -> const char* {
     const char* sp = strstr(l, "  ");
-    if (sp) {
-      char k[16];
-      int m = std::min<int>(sp - l, 15);
-      memcpy(k, l, m); k[m] = 0;
+    if (!sp) return nullptr;
+    int m = std::min<int>(sp - l, 15);
+    memcpy(k, l, m); k[m] = 0;
+    return sp + 2;
+  };
+  char k[16];
+  const int rows = 10, n = lines.size();
+  // key column width for each column of each page (two-column layout); a rare long key just pushes its own line
+  auto colKw = [&](int first) {
+    int kw = 0, i = 0;
+    for (auto l : lines) { if (i >= first && i < first + rows && split(l, k) && textW(k) <= 30) kw = std::max(kw, textW(k)); i++; }
+    return kw + 6;
+  };
+  auto descX = [&](int kw) { return std::max(kw, textW(k) + 6); };
+  bool two = true;
+  { int i = 0; for (auto l : lines) { int kw = colKw(i / rows * rows); const char* d = split(l, k); if ((d ? descX(kw) + textW(d) : textW(l)) > 106) two = false; i++; } }
+  int per = two ? rows * 2 : rows, pages = (n + per - 1) / per;
+  int page = pages > 1 ? (millis() / 6000) % pages : 0;
+  if (pages > 1) {
+    char b[8]; snprintf(b, sizeof(b), "%d/%d", page + 1, pages);
+    text(224 - textW(b), 18, b, T.grey, 1, false);
+    cv.fillRect(14, 27, (int)(212 * (millis() % 6000) / 6000), 1, T.dim);  // time left on this page
+  }
+  int kws[2] = {colKw(page * per), colKw(page * per + rows)};
+  if (!two) { kws[0] = 0; int i = 0; for (auto l : lines) { if (i / per == page && split(l, k) && textW(k) <= 60) kws[0] = std::max(kws[0], textW(k) + 6); i++; } }
+  int i = 0;
+  for (auto l : lines) {
+    int j = i++ - page * per;
+    if (j < 0 || j >= per) continue;
+    int x = 14 + (j / rows) * 112, y = 31 + (j % rows) * 9, cw = two ? 106 : 212;
+    const char* d = split(l, k);
+    if (d) {
+      int dx = descX(kws[j / rows]);
       text(x, y, k, T.white, 1, false);
-      text(x + 38, y, sp + 2, T.grey, 1, false);
-    } else {
-      text(x, y, l, T.purp, 1, false);
-    }
-    y += 9;
+      textFit(x + dx, y, d, T.grey, cw - dx, false);
+    } else textFit(x, y, l, T.purp, cw, false);
   }
 }

@@ -141,10 +141,10 @@ struct DrumsApp : App {
     }
     snprintf(b, sizeof(b), "SW%d %s", Drums::swing, preset >= 0 ? presets[preset].n : "");
     textFit(128, 2, b, T.dim, 36, false);  // keep clear of the volume / battery icons
-    hintBar({{"OK", "STEP"}, {"SPC", "PLAY"}, {"P", "PRESET"}, {"1-4", "PATTERN"}, {"\\", "HELP"}});
+    hintBar({{"OK", "STEP"}, {"SPC", "PLAY"}, {"P", "BEATS"}, {"1-4", "PATTERN"}, {"\\", "HELP"}});
     if (help)
       helpOverlay("DRUM MACHINE", {"ARROWS  MOVE", "OK  TOGGLE STEP", "SPC  PLAY/STOP", "1-4  PATTERN", "P  PRESET BEAT", "R  RANDOM ROW", "DEL  CLEAR ROW",
-                                   "C  CLEAR PATTERN", "D  COPY TO NEXT", "M  MUTE ROW", "H  HEAR SOUND", "B N  TEMPO", "W  SWING", "- =  VOLUME",
+                                   "C  CLEAR ALL", "D  DUPLICATE", "M  MUTE ROW", "H  HEAR SOUND", "B N  TEMPO", "W  SWING", "- =  VOLUME",
                                    "ZXVASFGJKL", "  FINGER DRUMS", "SYNCS WITH LOOPER"});
   }
 };

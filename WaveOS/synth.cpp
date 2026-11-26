@@ -308,8 +308,9 @@ struct SynthApp : App {
       hintBar({{"5", c5}, {"6", c6}, {"8", layer ? LAYER[layer] : "LAYER"}, {"9", hold ? "HOLD!" : "HOLD"}, {"R", "REC"}, {"\\", "?"}});
     }
     if (help)
-      helpOverlay("SYNTH + LOOPER", {"A-'  1 2 3 4 5 6 7 1 2 3 4", "W-P  2b 3b 5b 6b 7b 2b 3b", "Z X  OCTAVE", "C  WAVEFORM", "TAB  NEXT PARAM", "[ ]  ADJUST PARAM", "- =  VOLUME",
-                                     "5  CHORD TYPE (SHIFT=BACK)", "6  ARPEGGIATOR", "7  ARP RANGE", "8  OCTAVE LAYER", "9  HOLD", ", /  KEY (WHICH NOTE IS 1)", "0  METRONOME", "R  REC/OVERDUB", "SPC  PLAY/STOP", "1-4  TRACK", "M  MUTE TRACK", "Q  QUANTIZE", "B N  BPM", "V  BARS",
+      helpOverlay("SYNTH + LOOPER", {"A-'  SCALE NOTES", "W-P  FLAT NOTES", "Z X  OCTAVE", "C  WAVEFORM", "TAB  NEXT PARAM", "[ ]  PARAM -/+", "- =  VOLUME",
+                                     "5  CHORD TYPE", "%  PREV CHORD", "6  ARPEGGIATOR", "7  ARP RANGE", "8  OCT. LAYER", "9  HOLD", ", /  KEY (ROOT)",
+                                     "0  METRONOME", "R  REC/OVERDUB", "SPC  PLAY/STOP", "1-4  TRACK", "M  MUTE TRACK", "Q  QUANTIZE", "B N  BPM", "V  BARS",
                                      "DEL  UNDO TAKE", "FN+DEL  CLEAR", "FN+S  SAVE", "FN+L  LOAD", "FN+E  EXPORT MID"});
   }
 };

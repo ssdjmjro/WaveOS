@@ -314,8 +314,12 @@ struct MenuApp : App {
       if (s) { panel(x, y, w, 76, a, lerpc(T.panel, a, 0.1f)); frame(x - 1, y - 1, w + 2, 78, lerpc(T.bg0, a, 0.35f)); }
       else panel(x, y, w, 76, T.edge);
       drawIcon(x + w / 2 - 16, y + 10, items[i].icon, 2, s ? a : lerpc(a, T.bg1, 0.45f));
-      textC(x + w / 2, y + 50, items[i].n, s ? T.white : T.grey);
-      textC(x + w / 2, y + 62, items[i].d, s ? a : T.dim, 1, false);
+      for (int r = 0; r < 2; r++) {                       // keep both lines inside the card
+        const char* t = r ? items[i].d : items[i].n;
+        uint16_t c = r ? (s ? a : T.dim) : (s ? T.white : T.grey);
+        if (textW(t) <= w - 4) textC(x + w / 2, y + 50 + r * 12, t, c, 1, !r);
+        else textFit(x + 2, y + 50 + r * 12, t, c, w - 4, !r);
+      }
     }
     for (int i = 0; i < n && n > 3; i++) cv.fillRect(120 - n * 4 + i * 8, 104, i == sel ? 4 : 2, 2, i == sel ? a : T.dim);
     hintBar({{"<>", "MOVE"}, {"OK", "OPEN"}, {"ESC", "BACK"}});
@@ -632,11 +636,11 @@ void setup() {
                                    {"RESISTOR", "COLOR CODE", IC_RES, &appResistor}, {"ELEC", "OHM LED 555", IC_ELEC, &appElec},
                                    {"TIMER", "STOPWATCH", IC_TIMER, &appTimer}, {"METRONOME", "TAP TEMPO", IC_METRO, &appMetro},
                                    {"FLASHLIGHT", "LIGHT / SOS", IC_FLASH, &appFlash}, {"MORSE", "BEEP CODE", IC_MORSE, &appMorse},
-                                   {"LEVEL", "BUBBLE LEVEL", IC_LEVEL, &appLevel}, {"CONVERT", "UNITS", IC_CONV, &appConvert},
-                                   {"DECIDE", "WHEEL / VERSUS", IC_DECIDE, &appDecide}}, accYel);
+                                   {"LEVEL", "TILT METER", IC_LEVEL, &appLevel}, {"CONVERT", "UNITS", IC_CONV, &appConvert},
+                                   {"DECIDE", "WHEEL + VS", IC_DECIDE, &appDecide}}, accYel);
   appGames = new MenuApp("GAMES", {{"STARFALL", "SHOOTER", IC_STARFALL, &appStarfall}, {"RUNNER", "ENDLESS", IC_RUNNER, &appRunner},
                                    {"SNAKE", "CLASSIC", IC_SNAKE, &appSnake}, {"BLOCKS", "LINE CLEAR", IC_BLOCKS, &appBlocks},
-                                   {"MERGE", "NUMBER PUZZLE", IC_2048, &app2048}, {"MINES", "LOGIC", IC_MINES, &appMines},
+                                   {"MERGE", "NUMBERS", IC_2048, &app2048}, {"MINES", "LOGIC", IC_MINES, &appMines},
                                    {"BRICKS", "KEYS / TILT", IC_BREAKOUT, &appBreakout}, {"DUEL", "VS CPU", IC_DUEL, &appDuel},
                                    {"GLIDER", "ONE BUTTON", IC_FLAPPY, &appFlappy}, {"ECHO", "MEMORY", IC_ECHO, &appEcho},
                                    {"TYPING", "WORD RAIN", IC_TYPING, &appTyping}, {"RHYTHM", "D F J K", IC_RHYTHM, &appRhythm},
@@ -647,7 +651,7 @@ void setup() {
   appFun = new MenuApp("FUN", {{"SUDOKU", "LOGIC", IC_SUDOKU, &appSudoku}, {"WORDS", "GUESS IT", IC_WORDS, &appWords},
                                {"PIXEL PET", "CARE FOR IT", IC_PET, &appPet}, {"DOODLE", "PIXEL ART", IC_DOODLE, &appDoodle},
                                {"TIC TAC TOE", "CPU / 2P", IC_TTT, &appTtt}, {"BUBBLES", "POP POP", IC_BUBBLES, &appBubbles},
-                               {"ORACLE", "DICE COIN ASK", IC_ORACLE, &appOracle}, {"FIVE", "WORD IN 6", IC_FIVE, &appFive},
+                               {"ORACLE", "DICE / COIN", IC_ORACLE, &appOracle}, {"FIVE", "WORD IN 6", IC_FIVE, &appFive},
                                {"CODE", "CRACK IT", IC_CODE, &appCode}, {"LIGHTS", "ALL OFF", IC_LIGHTS, &appLights},
                                {"SLIDE", "15 PUZZLE", IC_SLIDE, &appSlide}, {"REFLEX", "REACTION", IC_REFLEX, &appReflex},
                                {"LIFE", "PIXEL LIFE", IC_LIFE, &appLife}}, accGreen);
@@ -854,6 +858,9 @@ void loop() {
   if (saver) drawSaver();
   else {
     uint32_t d0 = micros();
+#ifdef CLIP_LOG
+    { extern bool clipQuiet; clipQuiet = cur == appHome || cur == appTools || cur == appGames || cur == appFun; }
+#endif
     try { cur->draw(); } catch (std::bad_alloc&) { cv.fillSprite(T.bg0); textC(120, 60, "OUT OF MEMORY", T.red); }
     drawToast(); drawVolume();
     perfDraw += micros() - d0;

@@ -13,7 +13,7 @@ def pump(sec):
         buf += s.read(500)
         while b'\n' in buf:
             l, buf = buf.split(b'\n', 1)
-            if b'[perf]' in l or b'[bench]' in l or b'[gfx]' in l or b'rror' in l or b'abort' in l.lower(): print(l.decode(errors='replace').strip(), flush=True)
+            if b'[perf]' in l or b'[bench]' in l or b'[gfx]' in l or b'[clip]' in l or b'rror' in l or b'abort' in l.lower(): print(l.decode(errors='replace').strip(), flush=True)
 pump(8)
 for c in script.split():
     if c.startswith('wait:'): pump(float(c[5:])); continue
