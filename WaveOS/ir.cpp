@@ -346,7 +346,7 @@ static void listIrDir(const String& dir) {
     if (n.startsWith(".")) continue;
     String l = n; l.toLowerCase();
     if (!isDir && !l.endsWith(".ir")) continue;
-    if (irFiles.size() >= 260) { irMore++; continue; }
+    if (irFiles.size() >= 400) { irMore++; continue; }
     irFiles.push_back(isDir ? n + "/" : n);
   }
   d.close();
@@ -432,6 +432,34 @@ static String sendIrSig(const IrSig& s) {
     rb[n++] = 500;
     IrSender.sendRaw(rb, n, 56);
   }
+  else if (p == "Kaseikyo") {  // Panasonic/Denon/JVC/... 48 bits LSB first; Flipper packs address as id<<24 | vendor<<8 | genre1<<4 | genre2
+    uint16_t vendor = (a >> 8) & 0xFFFF;
+    uint8_t g1 = (a >> 4) & 0xF, g2 = a & 0xF, id = (a >> 24) & 3;
+    uint16_t data = c & 0x3FF;
+    uint8_t d[6];
+    d[0] = vendor & 0xFF; d[1] = vendor >> 8;
+    uint8_t vp = d[0] ^ d[1]; vp = (vp ^ (vp >> 4)) & 0xF;
+    d[2] = (g1 << 4) | vp;
+    d[3] = ((data & 0xF) << 4) | g2;
+    d[4] = (id << 6) | ((data >> 4) & 0x3F);
+    d[5] = d[2] ^ d[3] ^ d[4];
+    static uint16_t kb[100];
+    int n = 0;
+    kb[n++] = 3456; kb[n++] = 1728;
+    for (int i = 0; i < 48; i++) { kb[n++] = 432; kb[n++] = (d[i / 8] >> (i % 8) & 1) ? 1296 : 432; }
+    kb[n++] = 432;
+    IrSender.sendRaw(kb, n, 37);
+  }
+  else if (p == "NEC42") {  // 13-bit address + inverse, 8-bit command + inverse, LSB first
+    static uint16_t nb[90];
+    int n = 0;
+    nb[n++] = 9000; nb[n++] = 4500;
+    uint32_t ad = a & 0x1FFF, cm = c & 0xFF;
+    uint64_t bits = ad | (uint64_t)(~ad & 0x1FFF) << 13 | (uint64_t)cm << 26 | (uint64_t)(~cm & 0xFF) << 34;
+    for (int i = 0; i < 42; i++) { nb[n++] = 560; nb[n++] = (bits >> i & 1) ? 1690 : 560; }
+    nb[n++] = 560;
+    IrSender.sendRaw(nb, n, 38);
+  }
   else return "";
   char b[40]; snprintf(b, sizeof(b), "%s A%X C%X", p.c_str(), (unsigned)a, (unsigned)c);
   return String(b);
@@ -477,7 +505,7 @@ static String scanNow;
 static void scanCollect(const String& dir, const String& rel, int depth) {
   File d = SD.open(dir);
   if (!d) return;
-  while (scanList.size() < 300) {
+  while (scanList.size() < 500) {
     File f = d.openNextFile();
     if (!f) break;
     String n = f.name();
