@@ -303,18 +303,28 @@ struct RocksApp : App {
   struct Shot { float x, y, vx, vy; int life; };
   std::vector<Rock> rocks;
   std::vector<Shot> shots;
+  struct Bit { float x, y, vx, vy; uint8_t life; uint16_t c; };
+  std::vector<Bit> bits;  // explosion debris
   int score = 0, best = 0, lives = 3, level = 0;
-  uint32_t lastShot = 0, safeT = 0;
+  uint32_t lastShot = 0, safeT = 0, waveT = 0, hyperT = 0;
+  void boom(float x, float y, int n, uint16_t c) {
+    for (int i = 0; i < n && bits.size() < 70; i++) {
+      float a = random(628) / 100.f, v = random(5, 22) / 10.f;
+      bits.push_back({x, y, cosf(a) * v, sinf(a) * v, (uint8_t)random(14, 30), c});
+    }
+  }
   bool over = false;
   RocksApp() { name = "ROCKS"; }
   void addRock(float x, float y, int size) {
-    Rock r{x, y, (random(-10, 11)) / 10.f * (1.2f / size + 0.3f), (random(-10, 11)) / 10.f * (1.2f / size + 0.3f), size, 0, {}};
+    float sp = (1.2f / size + 0.3f) * (1 + std::min(level, 10) * 0.08f);  // a little faster every wave
+    Rock r{x, y, (random(-10, 11)) / 10.f * sp, (random(-10, 11)) / 10.f * sp, size, 0, {}};
     for (auto& s : r.shape) s = random(70, 100);
     rocks.push_back(r);
   }
-  void nextLevel() { level++; for (int i = 0; i < 2 + level; i++) { float x = random(240), y = random(14, 125); if (fabsf(x - sx) < 50) x = fmodf(x + 120, 240); addRock(x, y, 3); } safeT = millis(); }
-  void reset() { rocks.clear(); shots.clear(); score = 0; lives = 3; level = 0; over = false; sx = 120; sy = 70; vx = vy = 0; nextLevel(); }
+  void nextLevel() { level++; for (int i = 0; i < 2 + level; i++) { float x = random(240), y = random(14, 125); if (fabsf(x - sx) < 50) x = fmodf(x + 120, 240); addRock(x, y, 3); } safeT = millis(); waveT = millis(); }
+  void reset() { rocks.clear(); shots.clear(); bits.clear(); score = 0; lives = 3; level = 0; over = false; sx = 120; sy = 70; vx = vy = 0; nextLevel(); }
   void enter() override { best = loadScore("rocks"); if (over || !score) reset(); }
+  void leave() override { bits.clear(); bits.shrink_to_fit(); }
   bool key(const KeyEv& e) override {
     if (over) { if (e.code == K_ENTER) { reset(); return true; } return false; }
     return dir4(e) != K_NONE || (e.code == K_CHAR && e.ch == ' ');
@@ -326,6 +336,15 @@ struct RocksApp : App {
     if (held4(',') || held4('a')) sa -= 0.09f;
     if (held4('/') || held4('d')) sa += 0.09f;
     if (held4(';') || held4('w')) { vx += cosf(sa) * 0.08f; vy += sinf(sa) * 0.08f; }
+    if ((held4('.') || held4('s')) && millis() - hyperT > 1500) {  // hyperspace: jump somewhere random
+      hyperT = millis(); boom(sx, sy, 8, T.cyan);
+      sx = random(10, 230); sy = random(20, 118); vx = vy = 0;
+      Audio::blip(1800, 80, Audio::W_SINE, 0.3f);
+    }
+    for (size_t i = 0; i < bits.size(); i++) {
+      Bit& b = bits[i]; b.x += b.vx; b.y += b.vy; b.vx *= 0.96f; b.vy *= 0.96f;
+      if (!--b.life) { bits[i] = bits.back(); bits.pop_back(); i--; }
+    }
     vx *= 0.99f; vy *= 0.99f;
     sx = wrapX(sx + vx); sy = wrapY(sy + vy);
     if (held4(' ') && millis() - lastShot > 200 && shots.size() < 6) {
@@ -346,6 +365,7 @@ struct RocksApp : App {
           score += (4 - r.size) * 20;
           Audio::blip(90 + r.size * 40, 120, Audio::W_NOISE, 0.4f);
           Rock old = r;
+          boom(old.x, old.y, 4 + old.size * 3, old.size == 3 ? T.grey : old.size == 2 ? T.yel : T.red);
           rocks.erase(rocks.begin() + j);
           if (old.size > 1) { addRock(old.x, old.y, old.size - 1); addRock(old.x, old.y, old.size - 1); }
         }
@@ -357,6 +377,7 @@ struct RocksApp : App {
         float rad = r.size * 5.f + 4;
         if ((sx - r.x) * (sx - r.x) + (sy - r.y) * (sy - r.y) < rad * rad) {
           lives--; Audio::blip(70, 500, Audio::W_SAW, 0.5f);
+          boom(sx, sy, 22, T.cyan); boom(sx, sy, 10, T.white);
           sx = 120; sy = 70; vx = vy = 0; safeT = millis();
           if (lives <= 0) { over = true; if (score > best) { best = score; saveScore("rocks", best); } }
           break;
@@ -378,6 +399,7 @@ struct RocksApp : App {
       (void)fx0; (void)fy0;
     }
     for (auto& s : shots) cv.fillRect(s.x - 1, s.y - 1, 2, 2, T.yel);
+    for (auto& b : bits) cv.drawPixel(b.x, b.y, b.life > 8 ? b.c : lerpc(T.bg0, b.c, b.life / 8.f));
     bool blink = millis() - safeT < 2000 && (millis() / 120) % 2;
     if (!blink && !over) {
       float c = cosf(sa), s = sinf(sa);
@@ -389,8 +411,9 @@ struct RocksApp : App {
     char b[24];
     snprintf(b, sizeof(b), "%d  LV%d", score, level); text(80, 2, b, T.white, 1, false);
     for (int i = 0; i < lives; i++) cv.fillTriangle(150 + i * 8, 9, 153 + i * 8, 2, 156 + i * 8, 9, T.cyan);
+    if (!over && millis() - waveT < 1300) { snprintf(b, sizeof(b), "WAVE %d", level); textC(120, 40, b, (millis() / 150) % 2 ? T.white : T.cyan, 2); }
     if (over) { snprintf(b, sizeof(b), "BEST %d - OK AGAIN", best); over4(120, "GAME OVER", b, T.red); }
-    hintBar({{"<>", "TURN"}, {"^", "THRUST"}, {"SPC", "FIRE"}, {"ESC", "BACK"}});
+    hintBar({{"<>", "TURN"}, {"^", "THRUST"}, {"SPC", "FIRE"}, {"v", "HYPERSPACE"}});
   }
 };
 

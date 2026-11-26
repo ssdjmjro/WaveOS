@@ -216,16 +216,27 @@ void load() {
     f.close();
   }
 }
+// built in RAM, written in the background (SD writes took seconds and froze the screen)
 void save() {
   if (!sdOK) return;
-  File f = SD.open("/waveos/stats.txt", FILE_WRITE);
-  if (f) {
-    f.printf("#total %u\n", (unsigned)totalSec);
-    for (auto& s : st) { int i = Lib::findHash(s.h); if (i >= 0) f.printf("%u\t%u\t%s\n", s.count, (unsigned)s.seq, Lib::files[i].c_str()); }
-    f.close();
+  String* a = new String(); String* b = new String();
+  a->reserve(st.size() * 60 + 20);
+  char line[24];
+  snprintf(line, sizeof(line), "#total %u\n", (unsigned)totalSec); *a += line;
+  for (auto& s : st) {
+    int i = Lib::findHash(s.h);
+    if (i < 0) continue;
+    snprintf(line, sizeof(line), "%u\t%u\t", s.count, (unsigned)s.seq);
+    *a += line; *a += Lib::files[i]; *a += '\n';
   }
-  f = SD.open("/waveos/bookmarks.txt", FILE_WRITE);
-  if (f) { for (auto& b : bms) { int i = Lib::findHash(b.h); if (i >= 0) f.printf("%u\t%s\n", (unsigned)b.pos, Lib::files[i].c_str()); } f.close(); }
+  for (auto& m : bms) {
+    int i = Lib::findHash(m.h);
+    if (i < 0) continue;
+    snprintf(line, sizeof(line), "%u\t", (unsigned)m.pos);
+    *b += line; *b += Lib::files[i]; *b += '\n';
+  }
+  sdWriteAsync("/waveos/stats.txt", a);
+  sdWriteAsync("/waveos/bookmarks.txt", b);
 }
 void played(const String& p) {  // saved a bit later (not during the song change)
   dirty = true; dirtyT = millis();
@@ -614,6 +625,7 @@ void musicTick() {
 
 // ===================================================================== UI
 struct MusicApp : App {
+  bool ownsPlusMinus() override { return true; }  // - = volume handled here, + adds to the queue in lists
   enum { V_PLAYING, V_SONGS, V_FOLDERS, V_FAVS, V_LISTS, V_QUEUE, V_COUNT, V_CTX };
   enum { R_SONG, R_FOLDER, R_LIST, R_HEADER, R_SHUFFLE };
   struct Row { uint8_t type; int16_t idx, aux; };  // tiny: names are looked up only when drawn

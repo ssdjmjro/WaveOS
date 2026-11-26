@@ -1,3 +1,4 @@
+#include <functional>
 // =====================================================================
 //  WAVE OS  -  custom firmware for the M5Stack Cardputer ADV
 //  DAP + synth/looper + IR remote + tools + notes + games
@@ -47,14 +48,25 @@ bool imuAccel(float& ax, float& ay, float& az) {
   return M5.Imu.getAccel(&ax, &ay, &az);
 }
 
-void saveSettings() {
+static String settingsText() {
+  char b[300];
+  snprintf(b, sizeof(b), "volume=%d\nmaxvol=%d\nbright=%d\ntheme=%d\nclick=%d\nirrx=%d\nshake=%d\ndim=%d\nsleep=%d\nmidich=%d\nrot=%d\nmusicoff=%d\nmute=%d\nbootsound=%d\n",
+           cfg.volume, cfg.maxVol, cfg.bright, cfg.theme, cfg.click, cfg.irRx, cfg.shake, cfg.dimSec, cfg.sleepMin, cfg.midiCh, cfg.rot, cfg.musicOff, cfg.mute, cfg.bootSound);
+  return String(b);
+}
+void saveSettings() {  // now (used before deep sleep)
   if (!sdOK) return;
   ensureDir("/waveos");
   File f = SD.open("/waveos/settings.txt", FILE_WRITE);
   if (!f) return;
-  f.printf("volume=%d\nmaxvol=%d\nbright=%d\ntheme=%d\nclick=%d\nirrx=%d\nshake=%d\ndim=%d\nsleep=%d\nmidich=%d\nrot=%d\nmusicoff=%d\nmute=%d\nbootsound=%d\n",
-           cfg.volume, cfg.maxVol, cfg.bright, cfg.theme, cfg.click, cfg.irRx, cfg.shake, cfg.dimSec, cfg.sleepMin, cfg.midiCh, cfg.rot, cfg.musicOff, cfg.mute, cfg.bootSound);
+  String s = settingsText();
+  f.write((const uint8_t*)s.c_str(), s.length());
   f.close();
+}
+void saveSettingsLater() {  // in the background (volume keys, settings screen)
+  if (!sdOK) return;
+  ensureDir("/waveos");
+  sdWriteAsync("/waveos/settings.txt", new String(settingsText()));
 }
 void loadSettings() {
   if (!sdOK) return;
@@ -96,6 +108,7 @@ void applyRotation() {
     if (M5Cardputer.Display.width() > M5Cardputer.Display.height()) land[n++] = r;
   }
   M5Cardputer.Display.setRotation(cfg.rot == 3 ? land[0] : land[1]);
+  invalidateFrame();
   Serial.printf("[waveos] using rotation %d (%dx%d)\n", M5Cardputer.Display.getRotation(), (int)M5Cardputer.Display.width(), (int)M5Cardputer.Display.height());
 }
 
@@ -110,10 +123,15 @@ void memLog(const char* where) {
 // ------------------------------------------------------------------ app switching
 void openApp(App* a) {
   if (!a || a == cur) return;
+  uint32_t t0 = millis();
   if (cur) cur->leave();
+  uint32_t t1 = millis();
+  App* from = cur;
   cur = a;
   try { cur->enter(); }
   catch (std::bad_alloc&) { char b[40]; snprintf(b, sizeof(b), "OUT OF MEMORY (%uK)", (unsigned)(ESP.getMaxAllocHeap() / 1024)); toast(b, 2500); memLog("oom-open"); cur = appHome; }
+  uint32_t t2 = millis();
+  if (t2 - t0 > 80) Serial.printf("[perf] slow switch %s leave=%ums -> %s enter=%ums\n", from ? from->name : "-", (unsigned)(t1 - t0), cur->name, (unsigned)(t2 - t1));
 }
 void goBack() { openApp(cur && cur->parent ? cur->parent : appHome); }
 void goHome() { openApp(appHome); }
@@ -151,7 +169,7 @@ struct HomeApp : App {
       case 1: return Looper::playing ? "LOOPER RUNNING" : "ARP CHORDS LOOPER";
       case 2: return Drums::playing ? "BEAT RUNNING" : "16 STEP DRUM MACHINE";
       case 3: return "TV  LEARN  RECEIVE  .IR";
-      case 4: return "CALC METRONOME TIMER";
+      case 4: return "CALC CONVERT DECIDE";
       case 5: return "MARKDOWN ON SD";
       case 6: return "17 GAMES";
       case 7: return "13 QUIET GAMES + TOYS";
@@ -169,8 +187,8 @@ struct HomeApp : App {
                               {"MAZE", "z"}, {"FOUR", "4"}, {"TANKS", "k"}, {"ROCKS", "q"}, {"HOPPER", "p"},
                               {"SUDOKU", "1"}, {"WORDS", "2"}, {"PET", "3"}, {"DOODLE", "5"}, {"TIC TAC TOE", "6"}, {"BUBBLES", "7"}, {"ORACLE", "8"},
                               {"FLASHLIGHT", "l"}, {"MORSE", "o"}, {"FIVE", ""}, {"CODE", ""}, {"LIGHTS", ""}, {"SLIDE", ""},
-                              {"REFLEX", ""}, {"LIFE", ""}, {"METRONOME", ""}};
-    for (int i = 0; i < 31; i++) { String n = extra[i][0]; n.toLowerCase(); if (n.indexOf(lq) >= 0) res.push_back({3, i, String("APP  ") + extra[i][0]}); }
+                              {"REFLEX", ""}, {"LIFE", ""}, {"METRONOME", ""}, {"LEVEL", ""}, {"CONVERT", ""}, {"DECIDE", ""}};
+    for (int i = 0; i < (int)(sizeof(extra) / sizeof(extra[0])); i++) { String n = extra[i][0]; n.toLowerCase(); if (n.indexOf(lq) >= 0) res.push_back({3, i, String("APP  ") + extra[i][0]}); }
     std::vector<int> songs;
     searchSongs(q, songs, 6);
     for (int s : songs) res.push_back({1, s, "SONG " + baseName(songPath(s))});
@@ -187,7 +205,7 @@ struct HomeApp : App {
       App* sub[] = {appCalc, appGraph, appResistor, appElec, appTimer, appSnake, app2048, appBlocks, appBreakout, appFlappy, appTyping, appRhythm,
                     appStarfall, appMines, appDuel, appEcho, appRunner, appMaze, appFour, appTanks, appRocks, appHopper,
                     appSudoku, appWords, appPet, appDoodle, appTtt, appBubbles, appOracle, appFlash, appMorse,
-                    appFive, appCode, appLights, appSlide, appReflex, appLife, appMetro};
+                    appFive, appCode, appLights, appSlide, appReflex, appLife, appMetro, appLevel, appConvert, appDecide};
       openApp(sub[r.idx]);
     }
   }
@@ -312,7 +330,7 @@ struct SettingsApp : App {
   int sel = 0, top = 0;
   static constexpr int N = 14;
   SettingsApp() { name = "SETUP"; }
-  void leave() override { saveSettings(); }
+  void leave() override { saveSettingsLater(); }
   void adjust(int d) {
     switch (sel) {
       case 0: cfg.volume = constrain(cfg.volume + d * 15, 0, (int)cfg.maxVol); cfg.mute = false; applyVolume(); Audio::blip(880, 60); break;
@@ -546,7 +564,7 @@ static uint32_t cfgChangedT = 0;
 static void settingsAutosave() {  // save ~2s after any setting (e.g. volume) changes
   if (memcmp(&savedCfg, &cfg, sizeof(cfg)) == 0) { cfgChangedT = 0; return; }
   if (!cfgChangedT) { cfgChangedT = millis(); return; }
-  if (millis() - cfgChangedT > 2000) { saveSettings(); savedCfg = cfg; cfgChangedT = 0; }
+  if (millis() - cfgChangedT > 2000) { saveSettingsLater(); savedCfg = cfg; cfgChangedT = 0; }
 }
 static void lowBatteryTick() {
   static bool warned10 = false, warned5 = false;
@@ -613,7 +631,9 @@ void setup() {
   appTools = new MenuApp("TOOLS", {{"CALC", "SCIENTIFIC", IC_CALC, &appCalc}, {"GRAPH", "F(X) PLOT", IC_GRAPH, &appGraph},
                                    {"RESISTOR", "COLOR CODE", IC_RES, &appResistor}, {"ELEC", "OHM LED 555", IC_ELEC, &appElec},
                                    {"TIMER", "STOPWATCH", IC_TIMER, &appTimer}, {"METRONOME", "TAP TEMPO", IC_METRO, &appMetro},
-                                   {"FLASHLIGHT", "LIGHT / SOS", IC_FLASH, &appFlash}, {"MORSE", "BEEP CODE", IC_MORSE, &appMorse}}, accYel);
+                                   {"FLASHLIGHT", "LIGHT / SOS", IC_FLASH, &appFlash}, {"MORSE", "BEEP CODE", IC_MORSE, &appMorse},
+                                   {"LEVEL", "BUBBLE LEVEL", IC_LEVEL, &appLevel}, {"CONVERT", "UNITS", IC_CONV, &appConvert},
+                                   {"DECIDE", "WHEEL / VERSUS", IC_DECIDE, &appDecide}}, accYel);
   appGames = new MenuApp("GAMES", {{"STARFALL", "SHOOTER", IC_STARFALL, &appStarfall}, {"RUNNER", "ENDLESS", IC_RUNNER, &appRunner},
                                    {"SNAKE", "CLASSIC", IC_SNAKE, &appSnake}, {"BLOCKS", "LINE CLEAR", IC_BLOCKS, &appBlocks},
                                    {"MERGE", "NUMBER PUZZLE", IC_2048, &app2048}, {"MINES", "LOGIC", IC_MINES, &appMines},
@@ -633,7 +653,7 @@ void setup() {
                                {"LIFE", "PIXEL LIFE", IC_LIFE, &appLife}}, accGreen);
   for (App* a : {appSudoku, appWords, appPet, appDoodle, appTtt, appBubbles, appOracle, appFive, appCode, appLights, appSlide, appReflex, appLife})
     a->parent = appFun;
-  for (App* a : {appCalc, appGraph, appResistor, appElec, appTimer, appMetro, appFlash, appMorse}) a->parent = appTools;
+  for (App* a : {appCalc, appGraph, appResistor, appElec, appTimer, appMetro, appFlash, appMorse, appLevel, appConvert, appDecide}) a->parent = appTools;
   for (App* a : {appSnake, app2048, appBlocks, appBreakout, appFlappy, appTyping, appRhythm, appStarfall, appMines, appDuel, appEcho, appRunner,
                  appMaze, appFour, appTanks, appRocks, appHopper})
     a->parent = appGames;
@@ -656,6 +676,7 @@ void setup() {
   // draw the first home frame while the backlight is off, then fade in
   cur->draw();
   cv.pushSprite(0, 0);
+  invalidateFrame();
   M5Cardputer.Display.waitDisplay();
   for (int i = 1; i <= 8; i++) { M5Cardputer.Display.setBrightness(cfg.bright * i / 8); delay(18); }
   lastInput = millis();
@@ -678,6 +699,21 @@ static void serialDev(std::vector<KeyEv>& keys) {
       int slot = holdN < 4 ? holdN++ : 0;
       for (int i = 0; i < holdN; i++) if (millis() >= holdUntil[i]) { slot = i; break; }
       holdC[slot] = line[1]; holdUntil[slot] = millis() + (line[2] ? atoi(line + 2) : 1500);
+      continue;
+    }
+    if (!strcmp(line, "BENCH")) {  // dev: time the drawing helpers (20 runs each)
+      auto T0 = [](const char* n, std::function<void()> f) { uint32_t t = micros(); for (int i = 0; i < 20; i++) f(); Serial.printf("[bench] %s %uus\n", n, (unsigned)((micros() - t) / 20)); };
+      extern int bgFast; Serial.printf("[bench] bgFast=%d\n", bgFast);
+      T0("background", [] { background(); });
+      T0("statusBar", [] { statusBar("HOME", T.cyan); });
+      T0("hintBar", [] { hintBar({{"<>", "MOVE"}, {"OK", "OPEN"}, {"1-9", "JUMP"}, {"A-Z", "SEARCH"}}); });
+      T0("icon1", [] { drawIcon(10, 40, 0, 1, T.cyan); });
+      T0("icon2", [] { drawIcon(10, 40, 0, 2, T.cyan); });
+      T0("text1x20", [] { text(10, 40, "HELLO WORLD 1234567", T.white, 1, true); });
+      T0("text2", [] { textC(120, 80, "MUSIC", T.white, 2); });
+      T0("panel52", [] { panel(10, 20, 52, 52, T.cyan, T.panel); });
+      T0("homeDraw", [] { appHome->draw(); });
+      T0("drawSprite", [] { cv.fillSprite(0); });
       continue;
     }
     bool logo = !strcmp(line, "LOGO");  // dev: screenshot of the boot screen
@@ -703,6 +739,37 @@ static void serialDev(std::vector<KeyEv>& keys) {
   }
 }
 
+static uint32_t perfN = 0, perfMax = 0; static uint64_t perfDraw = 0, perfPush = 0;
+// push only the screen rows that changed since the last frame (the SPI bus is the slowest part:
+// a full 240x135 frame takes ~20ms at 27MHz). A hash per row tells which rows differ.
+static uint32_t rowHash[135];
+static bool frameValid = false;
+void invalidateFrame() { frameValid = false; }
+static void pushFrame() {
+  auto& D = M5Cardputer.Display;
+  const uint32_t* p = (const uint32_t*)cv.getBuffer();
+  if (!p) { cv.pushSprite(0, 0); return; }
+  int runStart = -1;
+  auto flush = [&](int y1) {
+    if (runStart < 0) return;
+    D.setClipRect(0, runStart, 240, y1 - runStart);
+    cv.pushSprite(0, 0);
+    runStart = -1;
+  };
+  bool all = !frameValid;
+  for (int y = 0; y < 135; y++) {
+    uint32_t h = 2166136261u;
+    const uint32_t* r = p + y * 120;
+    for (int i = 0; i < 120; i++) h = (h ^ r[i]) * 16777619u;
+    bool changed = all || h != rowHash[y];
+    rowHash[y] = h;
+    if (changed) { if (runStart < 0) runStart = y; }
+    else flush(y);
+  }
+  flush(135);
+  D.clearClipRect();
+  frameValid = true;
+}
 void loop() {
   uint32_t t0 = millis();
   M5Cardputer.update();
@@ -724,7 +791,7 @@ void loop() {
   if (anyInput) {
     lastInput = millis();
     if (saver || screenOff) {  // wake up, swallow the key
-      if (screenOff) M5Cardputer.Display.wakeup();
+      if (screenOff) { M5Cardputer.Display.wakeup(); invalidateFrame(); }
       saver = false; screenOff = false;
       M5Cardputer.Display.setBrightness(cfg.bright);
       keys.clear(); g0 = false;
@@ -732,7 +799,7 @@ void loop() {
   }
   for (auto& e : keys) {
     if (e.fn && e.code == K_CHAR && tolower(e.ch) == 'p') { cur->draw(); screenshot(); continue; }
-    if (e.fn && e.code == K_CHAR && (e.ch == '-' || e.ch == '_' || e.ch == '=' || e.ch == '+')) { volumeChange(e.ch == '-' || e.ch == '_' ? -1 : 1); continue; }
+    if (e.code == K_CHAR && (e.ch == '-' || e.ch == '_' || e.ch == '=' || e.ch == '+') && (e.fn || !cur->ownsPlusMinus())) { volumeChange(e.ch == '-' || e.ch == '_' ? -1 : 1); continue; }
     if (e.fn && e.code == K_CHAR && (e.ch == '[' || e.ch == ']' || e.ch == '{' || e.ch == '}')) { brightnessChange(e.ch == '[' || e.ch == '{' ? -1 : 1); continue; }
     if (e.fn && e.code == K_CHAR && tolower(e.ch) == 'm') { cfg.mute = !cfg.mute; applyVolume(); toast(cfg.mute ? "MUTED (FN+M)" : "SOUND ON", 900); continue; }
     if (e.fn && e.code == K_CHAR && tolower(e.ch) == 'q') {  // boss key: instant calculator, press again to go back
@@ -752,11 +819,15 @@ void loop() {
   musicTick();
   settingsAutosave();
   timerTick();
+  extern void scoreTick(); scoreTick();
   static uint32_t memT = 0;
   if (millis() - memT > 5000) {  // heartbeat over USB serial (for debugging memory)
     memT = millis();
     Serial.printf("[mem] tick free=%u maxblock=%u minfree=%u app=%s music=%d\n", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap(),
                   (unsigned)ESP.getMinFreeHeap(), cur->name, Music::active() && !Music::paused());
+    if (perfN) Serial.printf("[perf] app=%s frames=%u draw=%uus push=%uus worst=%ums\n", cur->name, (unsigned)perfN, (unsigned)(perfDraw / perfN),
+                             (unsigned)(perfPush / perfN), (unsigned)perfMax);
+    perfN = 0; perfDraw = perfPush = 0; perfMax = 0;
   }
   lowBatteryTick();
   irTick();
@@ -782,10 +853,16 @@ void loop() {
   if (screenOff) { delay(70); return; }  // keys are still polled, audio keeps running
   if (saver) drawSaver();
   else {
+    uint32_t d0 = micros();
     try { cur->draw(); } catch (std::bad_alloc&) { cv.fillSprite(T.bg0); textC(120, 60, "OUT OF MEMORY", T.red); }
     drawToast(); drawVolume();
+    perfDraw += micros() - d0;
   }
-  cv.pushSprite(0, 0);
+  uint32_t p0 = micros();
+  pushFrame();
+  perfPush += micros() - p0; perfN++;
+  uint32_t ft = millis() - t0; if (ft > perfMax) perfMax = ft;
+  if (ft > 150) Serial.printf("[perf] slow frame %ums app=%s\n", (unsigned)ft, cur->name);
   uint32_t frame = saver ? 125 : (cur == appMusic || cur == appHome || cur == appNotes || cur == appSettings) ? 50 : 33;
   uint32_t dt = millis() - t0;
   if (dt < frame) delay(frame - dt);

@@ -239,6 +239,7 @@ struct GraphApp : App {
   const int GX = 0, GY = 12, GW = 240, GH = 113;
   GraphApp() { name = "GRAPH"; fx[0].set("2x^2+x^3"); fx[1].set(""); }
   bool wantsAllKeys() override { return editing >= 0; }
+  bool ownsPlusMinus() override { return true; }  // zoom
   double px2x(int px) { return xmin + (xmax - xmin) * px / (GW - 1); }
   int y2py(double y) { return GY + (int)((ymax - y) / (ymax - ymin) * (GH - 1)); }
   void recompute() {

@@ -32,8 +32,20 @@ struct BlocksApp : App {
   static constexpr int BW = 10, BH = 20, CS = 5, GX = 60, GY = 14;
   uint8_t g[BH][BW];
   int px, py, rot, piece, nextP, score = 0, lines = 0, level = 1, best = 0;
+  int holdP = -1;            // C: keep a piece for later (once per drop)
+  bool canHold = true;
+  uint8_t bag[7]; int bagN = 0;  // 7-bag: every piece once per 7, no long droughts
   bool over = false, paused = false;
   uint32_t lastFall = 0;
+  uint32_t groundT = 0;      // lock delay: a landed piece can still slide for a moment
+  int moves = 0;
+  uint32_t clearT = 0;       // full rows flash before they vanish
+  bool clearRow[BH];
+  int combo = 0;
+  int bagNext() {
+    if (!bagN) { for (int i = 0; i < 7; i++) bag[i] = i; for (int i = 6; i > 0; i--) std::swap(bag[i], bag[random(i + 1)]); bagN = 7; }
+    return bag[--bagN];
+  }
   static const uint16_t SH[7][4];  // 4x4 bitmasks per rotation
   BlocksApp() { name = "BLOCKS"; }
   bool cell(int p, int r, int x, int y) { return SH[p][r] & (0x8000 >> (y * 4 + x)); }
@@ -47,53 +59,80 @@ struct BlocksApp : App {
     return true;
   }
   void spawn() {
-    piece = nextP; nextP = random(7); rot = 0; px = 3; py = -1;
+    piece = nextP; nextP = bagNext(); rot = 0; px = 3; py = -1; canHold = true; groundT = 0; moves = 0;
     if (!fits(piece, rot, px, py)) { over = true; if (score > best) { best = score; saveScore("blocks", best); } Audio::blip(110, 400, Audio::W_SAW); }
   }
-  void reset() { memset(g, 0, sizeof(g)); score = lines = 0; level = 1; over = false; paused = false; nextP = random(7); spawn(); }
+  void reset() { memset(g, 0, sizeof(g)); score = lines = 0; level = 1; over = false; paused = false; bagN = 0; holdP = -1; combo = 0; clearT = 0; nextP = bagNext(); spawn(); }
+  void hold() {
+    if (!canHold) return;
+    if (holdP < 0) { holdP = piece; spawn(); }
+    else { std::swap(holdP, piece); rot = 0; px = 3; py = -1; groundT = 0; }
+    canHold = false;
+    Audio::blip(500, 25, Audio::W_TRI, 0.3f);
+  }
+  bool grounded() { return !fits(piece, rot, px, py + 1); }
+  void moved() { if (groundT && moves < 15) { groundT = millis(); moves++; } }  // moving on the ground resets the lock timer (max 15)
+  void removeRows() {
+    for (int y = BH - 1; y >= 0; y--)
+      if (clearRow[y]) { for (int yy = y; yy > 0; yy--) { memcpy(g[yy], g[yy - 1], BW); clearRow[yy] = clearRow[yy - 1]; } memset(g[0], 0, BW); clearRow[0] = false; y++; }
+    clearT = 0;
+    spawn();
+  }
   void enter() override { best = loadScore("blocks"); if (!score || over) reset(); }
   void lock() {
     bool spill = false;
     for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++)
       if (cell(piece, rot, x, y)) { if (py + y >= 0) g[py + y][px + x] = piece + 1; else spill = true; }
     int cleared = 0;
-    for (int y = BH - 1; y >= 0; y--) {
+    for (int y = 0; y < BH; y++) {
       bool full = true;
       for (int x = 0; x < BW; x++) if (!g[y][x]) full = false;
-      if (full) { cleared++; for (int yy = y; yy > 0; yy--) memcpy(g[yy], g[yy - 1], BW); memset(g[0], 0, BW); y++; }
+      clearRow[y] = full;
+      if (full) cleared++;
     }
     static const int pts[5] = {0, 100, 300, 500, 800};
-    score += pts[cleared] * level;
+    combo = cleared ? combo + 1 : 0;
+    score += pts[cleared] * level + (combo > 1 ? 50 * (combo - 1) * level : 0);
     lines += cleared;
     level = 1 + lines / 10;
-    if (cleared) Audio::blip(660 + cleared * 220, 90, Audio::W_SQUARE); else Audio::blip(220, 20, Audio::W_TRI, 0.3f);
+    if (cleared) {
+      Audio::blip(cleared == 4 ? 1320 : 660 + cleared * 160, cleared == 4 ? 220 : 90, Audio::W_SQUARE);
+      if (cleared == 4) toast("FOUR LINES!", 900); else if (combo > 1) { char b[16]; snprintf(b, sizeof(b), "COMBO x%d", combo); toast(b, 700); }
+    } else Audio::blip(220, 20, Audio::W_TRI, 0.3f);
     if (spill && !cleared) { over = true; if (score > best) { best = score; saveScore("blocks", best); } Audio::blip(110, 400, Audio::W_SAW); return; }
+    if (cleared) { clearT = millis(); return; }  // rows flash, then removeRows() from tick()
     spawn();
   }
   bool key(const KeyEv& e) override {
     if (over) { if (e.code == K_ENTER) { reset(); return true; } return false; }
     if (e.is('p')) { paused = !paused; return true; }
     if (paused) return false;
+    if (clearT) return e.code != K_ESC;
     KeyCode k = gdir(e);
-    if (k == K_LEFT && fits(piece, rot, px - 1, py)) { px--; return true; }
-    if (k == K_RIGHT && fits(piece, rot, px + 1, py)) { px++; return true; }
-    if (k == K_DOWN) { if (fits(piece, rot, px, py + 1)) { py++; score++; } else lock(); return true; }
+    if (k == K_LEFT && fits(piece, rot, px - 1, py)) { px--; moved(); return true; }
+    if (k == K_RIGHT && fits(piece, rot, px + 1, py)) { px++; moved(); return true; }
+    if (k == K_DOWN) { if (fits(piece, rot, px, py + 1)) { py++; score++; lastFall = millis(); } else lock(); return true; }
     if (k == K_UP || e.is('x')) {
       int r = (rot + 1) % 4;
-      for (int kick : {0, -1, 1, -2, 2}) if (fits(piece, r, px + kick, py)) { rot = r; px += kick; break; }
+      for (int kick : {0, -1, 1, -2, 2}) if (fits(piece, r, px + kick, py)) { rot = r; px += kick; moved(); break; }
       return true;
     }
-    if (e.is('z')) { int r = (rot + 3) % 4; if (fits(piece, r, px, py)) rot = r; return true; }
+    if (e.is('z')) { int r = (rot + 3) % 4; for (int kick : {0, 1, -1}) if (fits(piece, r, px + kick, py)) { rot = r; px += kick; moved(); break; } return true; }
+    if (e.is('c')) { hold(); return true; }
     if (e.code == K_CHAR && e.ch == ' ') { while (fits(piece, rot, px, py + 1)) { py++; score += 2; } lock(); return true; }
     return false;
   }
   void tick() override {
     if (over || paused) return;
+    if (clearT) { if (millis() - clearT > 220) removeRows(); return; }
     uint32_t sp = std::max(80, 600 - (level - 1) * 55);
-    if (millis() - lastFall > sp) {
-      lastFall = millis();
-      if (fits(piece, rot, px, py + 1)) py++; else lock();
+    if (grounded()) {
+      if (!groundT) groundT = millis();
+      if (millis() - groundT > 450) lock();
+      return;
     }
+    groundT = 0;
+    if (millis() - lastFall > sp) { lastFall = millis(); py++; }
   }
   uint16_t pc(int p) { return gradc(p / 6.f); }
   void block(int x, int y, uint16_t c, int s = CS) {
@@ -104,11 +143,13 @@ struct BlocksApp : App {
     background();
     statusBar("BLOCKS", T.blue);
     panel(GX - 2, GY - 1, BW * CS + 4, BH * CS + 3, T.blueD, T.bg0);
+    bool flashOn = clearT && ((millis() - clearT) / 55) % 2 == 0;
     for (int y = 0; y < BH; y++) for (int x = 0; x < BW; x++) {
+      if (clearT && clearRow[y]) { cv.fillRect(GX + x * CS, GY + 1 + y * CS, CS - 1, CS - 1, flashOn ? T.white : T.cyan); continue; }
       if (g[y][x]) block(GX + x * CS, GY + 1 + y * CS, pc(g[y][x] - 1));
       else if ((x + y) & 1) cv.drawPixel(GX + x * CS + 2, GY + 3 + y * CS, T.bg2);
     }
-    if (!over) {
+    if (!over && !clearT) {
       int gy = py;
       while (fits(piece, rot, px, gy + 1)) gy++;
       for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++)
@@ -124,9 +165,12 @@ struct BlocksApp : App {
     for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++) if (cell(nextP, 0, x, y)) block(126 + x * 6, 94 + y * 6, pc(nextP), 6);
     snprintf(b, sizeof(b), "LV %d", level); text(170, 83, b, T.cyan, 1, false);
     snprintf(b, sizeof(b), "LN %d", lines); text(170, 95, b, T.cyan, 1, false);
-    panel(4, 15, 52, 108, T.edge);
-    text(8, 19, "^ ROT", T.dim, 1, false); text(8, 30, "<> MOVE", T.dim, 1, false); text(8, 41, "v SOFT", T.dim, 1, false);
-    text(8, 52, "SPC", T.dim, 1, false); text(8, 61, " DROP", T.dim, 1, false); text(8, 72, "P PAUSE", T.dim, 1, false);
+    panel(4, 15, 52, 44, T.edge);
+    text(8, 19, "HOLD C", canHold ? T.grey : T.dim, 1, false);
+    if (holdP >= 0) for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++) if (cell(holdP, 0, x, y)) block(13 + x * 6, 31 + y * 6, canHold ? pc(holdP) : T.dim, 6);
+    panel(4, 62, 52, 61, T.edge);
+    text(7, 66, "^X ROT", T.dim, 1, false); text(7, 77, "Z  BACK", T.dim, 1, false); text(7, 88, "v  SOFT", T.dim, 1, false);
+    text(7, 99, "SPC", T.dim, 1, false); text(29, 99, "DROP", T.dim, 1, false); text(7, 110, "P  PAUSE", T.dim, 1, false);
     if (paused) overPanel(GX + BW * CS / 2, "PAUSED", "P TO GO", T.white);
     if (over) overPanel(GX + BW * CS / 2, "GAME OVER", "OK = AGAIN", T.red);
     hintBar({{"<>", "MOVE"}, {"^", "ROTATE"}, {"SPC", "DROP"}, {"ESC", "BACK"}});

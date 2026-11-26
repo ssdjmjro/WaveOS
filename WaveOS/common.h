@@ -7,7 +7,7 @@
 #include <initializer_list>
 
 #define FW_NAME "WAVE OS"
-#define FW_VER  "1.22"
+#define FW_VER  "1.24"
 
 // ---------------------------------------------------------------- theme
 struct Theme {
@@ -53,7 +53,7 @@ enum IconId { IC_MUSIC, IC_SYNTH, IC_MIDI, IC_IR, IC_TOOLS, IC_NOTES, IC_GAMES, 
               IC_BREAKOUT, IC_FLAPPY, IC_TYPING, IC_RHYTHM, IC_DRUMS, IC_STARFALL, IC_MINES,
               IC_DUEL, IC_ECHO, IC_RUNNER, IC_MAZE, IC_FOUR, IC_TANKS, IC_ROCKS, IC_HOPPER, IC_TIMER, IC_FUN, IC_SUDOKU, IC_WORDS, IC_PET, IC_DOODLE,
               IC_TTT, IC_BUBBLES, IC_ORACLE, IC_WIFI, IC_FLASH, IC_MORSE,
-              IC_LIGHTS, IC_SLIDE, IC_REFLEX, IC_CODE, IC_FIVE, IC_LIFE, IC_METRO, IC_COUNT };
+              IC_LIGHTS, IC_SLIDE, IC_REFLEX, IC_CODE, IC_FIVE, IC_LIFE, IC_METRO, IC_LEVEL, IC_CONV, IC_DECIDE, IC_COUNT };
 
 // ---------------------------------------------------------------- input
 enum KeyCode : uint8_t { K_NONE, K_CHAR, K_UP, K_DOWN, K_LEFT, K_RIGHT, K_ENTER, K_BACK, K_ESC, K_TAB };
@@ -80,6 +80,7 @@ struct App {
   virtual void tick() {}
   virtual void draw() = 0;
   virtual bool wantsAllKeys() { return false; }     // true = no key click
+  virtual bool ownsPlusMinus() { return wantsAllKeys(); }  // false = - and = change the volume
   virtual ~App() {}
 };
 void openApp(App* a);
@@ -92,7 +93,8 @@ extern App *appHome, *appMusic, *appSynth, *appIR, *appTools, *appNotes, *appGam
            *appMaze, *appFour, *appTanks, *appRocks, *appHopper, *appTimer,
            *appFun, *appSudoku, *appWords, *appPet, *appDoodle, *appTtt, *appBubbles, *appOracle,
            *appWifi, *appFlash, *appMorse,
-           *appLights, *appSlide, *appReflex, *appCode, *appFive, *appLife;
+           *appLights, *appSlide, *appReflex, *appCode, *appFive, *appLife,
+           *appLevel, *appConvert, *appDecide;
 
 // ---------------------------------------------------------------- settings
 struct Settings {
@@ -122,13 +124,17 @@ void ensureDir(const char* p);
 String baseName(const String& path);
 String parentName(const String& path);
 void sendToGraph(const char* expr);  // calculator -> graph
+void invalidateFrame();               // next frame is pushed in full (after drawing straight to the display)
 void volumeChange(int dir);          // +1 / -1, shows a volume overlay
 void applyVolume();                  // volume or 0 when muted (Fn+M)
 String clockString();
 void memLog(const char* where);       // append free-heap numbers to /waveos/mem.txt                // "HH:MM" once the time was set over WiFi, else ""
 namespace Batt { extern float mv; extern int pct; extern bool usb, charging; void tick(); }
+void sdWriteAsync(const char* path, String* data);  // takes ownership; written in the background
+bool sdWriteBusy();
+void saveSettingsLater();
 int loadScore(const char* key);
-void saveScore(const char* key, int val);
+void saveScore(const char* key, int val, bool isBest = true);  // isBest: NEW BEST toast + fanfare
 bool imuAccel(float& ax, float& ay, float& az);
 void searchSongs(const String& q, std::vector<int>& out, int max);
 String songPath(int idx);

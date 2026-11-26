@@ -102,6 +102,27 @@ void glowFrame(int x, int y, int w, int h, uint16_t c) {
 // ------------------------------------------------------------------ background (dithered vignette + stars)
 static const uint8_t BAYER[4][4] = {{0, 8, 2, 10}, {12, 4, 14, 6}, {3, 11, 1, 9}, {15, 7, 13, 5}};
 static void palC(int i, uint16_t c) { bgs.setPaletteColor(i, ((c >> 11) & 31) * 255 / 31, ((c >> 5) & 63) * 255 / 63, (c & 31) * 255 / 31); }
+// fast copy: the 2-bit sprite is expanded with a 256-entry table (4 pixels per byte) straight into the
+// frame buffer. pushSprite() converted pixel by pixel and took ~12ms of every frame.
+static uint64_t bgLut[256];
+int bgFast = 0;  // 0 untested, 1 fast path verified, -1 use pushSprite
+static void bgBuildLut() {
+  uint16_t pc[4];
+  const uint16_t cols[4] = {T.bg0, T.bg1, T.bg2, lerpc(T.dim, T.grey, 0.5f)};
+  for (int i = 0; i < 4; i++) { uint16_t c = cols[i]; pc[i] = (uint16_t)((c >> 8) | (c << 8)); }  // frame buffer is byte swapped
+  for (int v = 0; v < 256; v++) {
+    uint64_t q = 0;
+    for (int k = 0; k < 4; k++) q |= (uint64_t)pc[(v >> (6 - 2 * k)) & 3] << (16 * k);
+    bgLut[v] = q;
+  }
+}
+static bool bgCopyFast() {
+  const uint8_t* src = (const uint8_t*)bgs.getBuffer();
+  uint64_t* dst = (uint64_t*)cv.getBuffer();
+  if (!src || !dst || cv.width() != 240 || cv.height() != 135) return false;
+  for (int i = 0; i < 240 * 135 / 4; i++) dst[i] = bgLut[src[i]];
+  return true;
+}
 void rebuildBackground() {
   if (!bgReady) {  // 2-bit palette sprite: 8KB instead of 64KB
     bgs.setColorDepth(2);
@@ -110,6 +131,7 @@ void rebuildBackground() {
     bgs.createPalette();
   }
   palC(0, T.bg0); palC(1, T.bg1); palC(2, T.bg2); palC(3, lerpc(T.dim, T.grey, 0.5f));
+  bgBuildLut(); if (bgFast > 0) bgFast = 0;  // theme changed: re-verify
   for (int y = 0; y < 135; y++)
     for (int x = 0; x < 240; x++) {
       float dx = (x - 144) / 240.f, dy = (y - 74) / 135.f;
@@ -128,8 +150,20 @@ void rebuildBackground() {
   }
 }
 void background(bool plain) {
-  if (plain || !bgReady) cv.fillSprite(T.bg0);
-  else bgs.pushSprite(&cv, 0, 0);
+  if (plain || !bgReady) { cv.fillSprite(T.bg0); return; }
+  if (bgFast == 0) {  // first use: check the table gives exactly what pushSprite draws
+    bgs.pushSprite(&cv, 0, 0);
+    const uint8_t* src = (const uint8_t*)bgs.getBuffer();
+    const uint64_t* dst = (const uint64_t*)cv.getBuffer();
+    bgFast = -1;
+    if (src && dst) {
+      bgFast = 1;
+      for (int i = 0; i < 240 * 135 / 4; i++) if (dst[i] != bgLut[src[i]]) { bgFast = -1; break; }
+    }
+    Serial.printf("[gfx] fast background %s\n", bgFast > 0 ? "ok" : "MISMATCH, using pushSprite");
+    return;
+  }
+  if (bgFast < 0 || !bgCopyFast()) bgs.pushSprite(&cv, 0, 0);
 }
 
 void drawWave(int x0, int x1, int cy, float amp, float phase, bool glow, float reveal) {
@@ -363,7 +397,10 @@ static const char* const ICONS[IC_COUNT][16] = {
  {"................","................",".###.###.###.###",".###.###.###.###",".###.###.###.###","................","................",".###.###.###.###",".#.#.#.#.#.#.#.#",".###.###.###.###","................","................","..##..##........","..##..##..##..##","..........##..##","................"},  // CODE
  {"................","................",".##.......##....",".##.......##....",".##.##.##.##.##.","................","....##.##.......","....##.##.......",".##.##.##.##.##.","................",".##.##.##.##.##.",".##.##.##.##.##.",".##.##.##.##.##.","................","................","................"},  // FIVE
  {"................","................","......###.......","......###.......","......###.......","................","..........###...","..........###...","..........###...","................","..###.###.###...","..###.###.###...","..###.###.###...","................","................","................"},  // LIFE
- {"................","......####......","......#..#....##",".....#....#..##.",".....#....#.##..","....#......##...","....#.....###...","...#.....##..#..","...#....##...#..","..#....##.....#.","..#...###.....#.",".#....###......#",".###############",".###############","................","................"}  // METRO
+ {"................","......####......","......#..#....##",".....#....#..##.",".....#....#.##..","....#......##...","....#.....###...","...#.....##..#..","...#....##...#..","..#....##.....#.","..#...###.....#.",".#....###......#",".###############",".###############","................","................"},  // METRO
+ {"................","................","................","################","#..............#","#.....#..#.....#","#....######....#","#...########...#","#....######....#","#.....#..#.....#","#..............#","################","................","................","................","................"},  // LEVEL
+ {"................","..........#.....","..........##....","###############.","###############.","..........##....","..........#.....","................","................",".....#..........","....##..........",".###############",".###############","....##..........",".....#..........","................"},  // CONV
+ {".....######.....","...##..##..##...","..#....##....#..",".#.#...##...#.#.",".#..#..##..#..#.","#....#.##.#....#","#.....####.....#","################","################","#.....####.....#","#....#.##.#....#",".#..#..##..#..#.",".#.#...##...#.#.","..#....##....#..","...##..##..##...",".....######....."}  // DECIDE
 };
 void drawIcon(int x, int y, int idx, int sc, uint16_t c) {
   if (idx < 0 || idx >= IC_COUNT) return;

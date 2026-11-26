@@ -98,8 +98,6 @@ struct DrumsApp : App {
         for (int t = 0; t < 8; t++) Drums::pat[t][to] = Drums::pat[t][Drums::cur];
         snprintf(b, sizeof(b), "COPIED TO %d", to + 1); toast(b, 700); return true;
       }
-      case '-': Audio::drumVol = std::max(0.f, Audio::drumVol - 0.1f); return true;
-      case '=': Audio::drumVol = std::min(1.5f, Audio::drumVol + 0.1f); return true;
       case '\\': case '?': help = true; return true;
       case 'z': case 'x': case 'v': case 'a': case 's': case 'f': case 'g': case 'j': case 'k': case 'l': {
         const char* pads = "zxvasfgjkl";  // finger drumming
@@ -146,7 +144,7 @@ struct DrumsApp : App {
     hintBar({{"OK", "STEP"}, {"SPC", "PLAY"}, {"P", "PRESET"}, {"1-4", "PATTERN"}, {"\\", "HELP"}});
     if (help)
       helpOverlay("DRUM MACHINE", {"ARROWS  MOVE", "OK  TOGGLE STEP", "SPC  PLAY/STOP", "1-4  PATTERN", "P  PRESET BEAT", "R  RANDOM ROW", "DEL  CLEAR ROW",
-                                   "C  CLEAR PATTERN", "D  COPY TO NEXT", "M  MUTE ROW", "H  HEAR SOUND", "B N  TEMPO", "W  SWING", "- =  DRUM VOL",
+                                   "C  CLEAR PATTERN", "D  COPY TO NEXT", "M  MUTE ROW", "H  HEAR SOUND", "B N  TEMPO", "W  SWING", "- =  VOLUME",
                                    "ZXVASFGJKL", "  FINGER DRUMS", "SYNCS WITH LOOPER"});
   }
 };

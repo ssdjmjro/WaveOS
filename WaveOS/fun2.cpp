@@ -219,7 +219,7 @@ struct CodeApp : App {
     for (int i = 0; i < 4; i++) { if (guess[row][i] == secret[i]) b++; else { cs[secret[i]]++; cg[guess[row][i]]++; } }
     for (int v = 1; v <= 6; v++) w += std::min(cs[v], cg[v]);
     blackP[row] = b; whiteP[row] = w;
-    if (b == 4) { state = 1; wins++; saveScore("code", wins); Audio::blip(1320, 200, Audio::W_SQUARE, 0.3f); return; }
+    if (b == 4) { state = 1; wins++; saveScore("code", wins, false); Audio::blip(1320, 200, Audio::W_SQUARE, 0.3f); return; }
     Audio::blip(400 + b * 200, 40, Audio::W_TRI, 0.25f);
     if (++row >= ROWS) { state = 2; Audio::blip(150, 300, Audio::W_SAW, 0.3f); }
     col = 0;
@@ -316,9 +316,9 @@ struct FiveApp : App {
       uint8_t& km = keyMark[g[i] - 'A'];
       km = std::max(km, marks[row][i]);
     }
-    if (!strncmp(g, word, 5)) { state = 1; streak++; saveScore("five", streak); Audio::blip(1320, 200, Audio::W_SQUARE, 0.3f); return; }
+    if (!strncmp(g, word, 5)) { state = 1; streak++; saveScore("five", streak, false); Audio::blip(1320, 200, Audio::W_SQUARE, 0.3f); return; }
     Audio::blip(500, 30, Audio::W_TRI, 0.2f);
-    if (++row >= 6) { state = 2; streak = 0; saveScore("five", 0); Audio::blip(150, 300, Audio::W_SAW, 0.3f); }
+    if (++row >= 6) { state = 2; streak = 0; saveScore("five", 0, false); Audio::blip(150, 300, Audio::W_SAW, 0.3f); }
     len = 0;
   }
   bool key(const KeyEv& e) override {
@@ -366,6 +366,7 @@ struct LifeApp : App {
   int cx = 24, cy = 11, speed = 2, gen_ = 0, pop = 0;
   uint32_t lastT = 0;
   LifeApp() { name = "LIFE"; }
+  bool ownsPlusMinus() override { return true; }  // speed
   uint8_t& at(std::vector<uint8_t>& g, int x, int y) { return g[((y + H) % H) * W + (x + W) % W]; }
   void randomize() { for (auto& v : a) v = random(100) < 28 ? 1 : 0; gen_ = 0; }
   void enter() override { a.assign(W * H, 0); b.assign(W * H, 0); randomize(); run = true; }

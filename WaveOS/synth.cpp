@@ -53,6 +53,7 @@ struct SynthApp : App {
   SynthApp() { name = "SYNTH"; }
   void enter() override { Audio::useDelay(); }
   bool wantsAllKeys() override { return true; }
+  bool ownsPlusMinus() override { return false; }
   // reference counted: letting go of one chord never cuts a note another held chord still uses
   void soundOn(uint8_t n) {
     if (ref[n]++) return;
@@ -101,7 +102,7 @@ struct SynthApp : App {
       else { Looper::undo(track); toast("UNDO LAST TAKE"); }
       return true;
     }
-    if (e.code == K_TAB) { param = (param + 1) % NP; return true; }
+    if (e.code == K_TAB) { param = (param + (e.shift ? NP - 1 : 1)) % NP; return true; }
     if (e.code != K_CHAR) return false;
     char c = tolower(e.ch);
     if (e.fn) {
@@ -127,10 +128,8 @@ struct SynthApp : App {
         if (!hold) releaseHeld();
         toast(hold ? "HOLD ON" : "HOLD OFF", 700); return true;
       case 'c': Looper::tr[track].wave = (Looper::tr[track].wave + 1) % W_COUNT; return true;
-      case '[': param = (param + NP - 1) % NP; return true;
-      case ']': param = (param + 1) % NP; return true;
-      case '-': case '_': adjust(-1); return true;
-      case '=': case '+': adjust(1); return true;
+      case '[': case '{': adjust(-1); return true;
+      case ']': case '}': adjust(1); return true;
       case 'r': Looper::toggleRec(track); return true;
       case ' ': if (Looper::playing || Looper::counting) Looper::stop(); else Looper::play(); return true;
       case '1': case '2': case '3': case '4':
@@ -309,7 +308,7 @@ struct SynthApp : App {
       hintBar({{"5", c5}, {"6", c6}, {"8", layer ? LAYER[layer] : "LAYER"}, {"9", hold ? "HOLD!" : "HOLD"}, {"R", "REC"}, {"\\", "?"}});
     }
     if (help)
-      helpOverlay("SYNTH + LOOPER", {"A-'  1 2 3 4 5 6 7 1 2 3 4", "W-P  2b 3b 5b 6b 7b 2b 3b", "Z X  OCTAVE", "C  WAVEFORM", "TAB  NEXT PARAM", "[ ]  PARAM", "- =  ADJUST",
+      helpOverlay("SYNTH + LOOPER", {"A-'  1 2 3 4 5 6 7 1 2 3 4", "W-P  2b 3b 5b 6b 7b 2b 3b", "Z X  OCTAVE", "C  WAVEFORM", "TAB  NEXT PARAM", "[ ]  ADJUST PARAM", "- =  VOLUME",
                                      "5  CHORD TYPE (SHIFT=BACK)", "6  ARPEGGIATOR", "7  ARP RANGE", "8  OCTAVE LAYER", "9  HOLD", ", /  KEY (WHICH NOTE IS 1)", "0  METRONOME", "R  REC/OVERDUB", "SPC  PLAY/STOP", "1-4  TRACK", "M  MUTE TRACK", "Q  QUANTIZE", "B N  BPM", "V  BARS",
                                      "DEL  UNDO TAKE", "FN+DEL  CLEAR", "FN+S  SAVE", "FN+L  LOAD", "FN+E  EXPORT MID"});
   }

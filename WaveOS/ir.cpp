@@ -327,28 +327,34 @@ static void sendCapture(const Capture& c) {
 
 // ---- Flipper-style .ir files in /ir (e.g. from the open Flipper-IRDB collection)
 struct IrSig { String name, type, proto; uint32_t addr = 0, cmd = 0, freq = 38000; uint32_t dataPos = 0; };
-static std::vector<String> irFiles;
+static std::vector<String> irFiles;   // entries of irDir: folders end with '/'
 static std::vector<IrSig> irSigs;
-static String irFileOpen;
-static void scanIrFiles() {
-  irFiles.clear();
-  std::function<void(const String&, int)> walk = [&](const String& dir, int depth) {
-    File d = SD.open(dir);
-    if (!d) return;
-    while (irFiles.size() < 300) {
-      File f = d.openNextFile();
-      if (!f) break;
-      String n = f.name(), full = dir + "/" + n, l = n;
-      l.toLowerCase();
-      bool isDir = f.isDirectory();
-      f.close();
-      if (isDir && depth > 0) walk(full, depth - 1);
-      else if (l.endsWith(".ir")) irFiles.push_back(full.substring(4));  // strip "/ir/"
-    }
-    d.close();
-  };
-  walk("/ir", 2);
-  std::sort(irFiles.begin(), irFiles.end());
+static String irFileOpen;             // full path of the open .ir file
+static String irDir = "/ir";
+static int irMore = 0;                // entries not listed (RAM cap)
+static void listIrDir(const String& dir) {
+  irFiles.clear(); irMore = 0;
+  File d = SD.open(dir);
+  if (!d) return;
+  for (;;) {
+    File f = d.openNextFile();
+    if (!f) break;
+    String n = f.name();
+    int sl = n.lastIndexOf('/'); if (sl >= 0) n = n.substring(sl + 1);
+    bool isDir = f.isDirectory();
+    f.close();
+    if (n.startsWith(".")) continue;
+    String l = n; l.toLowerCase();
+    if (!isDir && !l.endsWith(".ir")) continue;
+    if (irFiles.size() >= 260) { irMore++; continue; }
+    irFiles.push_back(isDir ? n + "/" : n);
+  }
+  d.close();
+  std::sort(irFiles.begin(), irFiles.end(), [](const String& a, const String& b) {
+    bool da = a.endsWith("/"), db = b.endsWith("/");
+    if (da != db) return da;
+    return a.compareTo(b) < 0;   // byte order is fine for these names
+  });
 }
 static uint32_t hexBytesLE(const String& v) {  // "04 00 00 00" -> 0x00000004
   uint32_t r = 0; int sh = 0;
@@ -362,12 +368,12 @@ static uint32_t hexBytesLE(const String& v) {  // "04 00 00 00" -> 0x00000004
   }
   return r;
 }
-static bool openIrFile(const String& rel) {
+static bool openIrFile(const String& path) {
   irSigs.clear();
-  File f = SD.open("/ir/" + rel);
+  File f = SD.open(path);
   if (!f) return false;
   IrSig cur; bool have = false;
-  while (f.available() && irSigs.size() < 80) {
+  while (f.available() && irSigs.size() < 100) {
     uint32_t lineStart = f.position();
     String l = f.readStringUntil('\n'); l.trim();
     int c = l.indexOf(':');
@@ -383,14 +389,14 @@ static bool openIrFile(const String& rel) {
   }
   if (have) irSigs.push_back(cur);
   f.close();
-  irFileOpen = rel;
+  irFileOpen = path;
   return true;
 }
 static String sendIrSig(const IrSig& s) {
   String p = s.proto;
   uint32_t a = s.addr, c = s.cmd;
   if (s.type == "raw") {
-    File f = SD.open("/ir/" + irFileOpen);
+    File f = SD.open(irFileOpen);
     if (!f) return "";
     f.seek(s.dataPos);
     String l = f.readStringUntil('\n');
@@ -431,11 +437,69 @@ static String sendIrSig(const IrSig& s) {
   return String(b);
 }
 
+// ---- POWER SCAN: send the POWER signal of every remote file in a folder (and its sub folders) one after
+// another, so you can find which file matches a device you have no remote list for. OK when it reacts.
+static bool isPowerName(String n) {
+  n.toUpperCase();
+  return n.indexOf("POWER") >= 0 || n == "PWR" || n == "ON/OFF" || n == "ON_OFF" || n == "ONOFF" || n == "STANDBY";
+}
+static bool findPowerSig(const String& path, IrSig& out) {  // first POWER-like signal in a file, without loading it all
+  File f = SD.open(path);
+  if (!f) return false;
+  IrSig cur; bool have = false, found = false;
+  while (f.available()) {
+    uint32_t lineStart = f.position();
+    String l = f.readStringUntil('\n'); l.trim();
+    int c = l.indexOf(':');
+    if (c < 0) continue;
+    String k = l.substring(0, c), v = l.substring(c + 1); v.trim();
+    if (k == "name") {
+      if (have && isPowerName(cur.name)) { found = true; break; }
+      cur = IrSig(); cur.name = v; cur.name.toUpperCase(); have = true;
+    }
+    else if (k == "type") cur.type = v;
+    else if (k == "protocol") cur.proto = v;
+    else if (k == "address") cur.addr = hexBytesLE(v);
+    else if (k == "command") cur.cmd = hexBytesLE(v);
+    else if (k == "frequency") cur.freq = v.toInt();
+    else if (k == "data") cur.dataPos = lineStart;
+  }
+  if (!found && have && isPowerName(cur.name)) found = true;
+  f.close();
+  if (found) out = cur;
+  return found;
+}
+static std::vector<String> scanList;   // paths relative to scanBase
+static String scanBase;
+static int scanIdx = -1, scanHits = 0;
+static uint32_t scanT = 0;
+static String scanNow;
+static void scanCollect(const String& dir, const String& rel, int depth) {
+  File d = SD.open(dir);
+  if (!d) return;
+  while (scanList.size() < 300) {
+    File f = d.openNextFile();
+    if (!f) break;
+    String n = f.name();
+    int sl = n.lastIndexOf('/'); if (sl >= 0) n = n.substring(sl + 1);
+    bool isDir = f.isDirectory();
+    f.close();
+    if (n.startsWith(".")) continue;
+    String l = n; l.toLowerCase();
+    if (isDir) { if (depth > 0) scanCollect(dir + "/" + n, rel + n + "/", depth - 1); }
+    else if (l.endsWith(".ir")) scanList.push_back(rel + n);
+  }
+  d.close();
+}
+static int sendAllIdx = -1;   // A in a file: every signal in turn
+static uint32_t sendAllT = 0;
+
 struct IRApp : App {
   int brand = 0;   // NBR = learned remote
   int btn = 0;
   bool inRemote = false;
   IRApp() { name = "IR"; }
+  bool ownsPlusMinus() override { return inRemote && brand <= NBR; }  // TV VOL+/VOL-
   void enter() override {
     if (!txReady) { IrSender.begin(IR_TX); txReady = true; loadLearned(); }
     loadMacros();
@@ -444,12 +508,35 @@ struct IRApp : App {
     learning = false; scanning = false; rxStop();
     caps.clear(); caps.shrink_to_fit();
     irSigs.clear(); irSigs.shrink_to_fit(); irFiles.clear(); irFiles.shrink_to_fit(); fileLevel = 0;
+    scanList.clear(); scanList.shrink_to_fit(); scanIdx = -1; sendAllIdx = -1;
   }
   void send(int b) {
     if (brand == NBR && !learned[b].set) { toast("NOT LEARNED - PRESS L"); return; }
     sendCode(brand, b);
   }
   int msel = 0, fsel = 0, fileLevel = 0, fileSel0 = 0, csel = 0;
+  void tick() override {
+    if (scanIdx >= 0 && millis() - scanT > 1100) {  // power scan: one file per ~1.1s
+      scanT = millis();
+      while (scanIdx < (int)scanList.size()) {
+        String path = scanBase + "/" + scanList[scanIdx++];
+        IrSig sg;
+        if (!findPowerSig(path, sg)) continue;   // no POWER in this file: next one right away
+        String keep = irFileOpen; irFileOpen = path;
+        String r = sendIrSig(sg);
+        irFileOpen = keep;
+        if (r.length()) { scanHits++; scanNow = scanList[scanIdx - 1]; lastInfo = r; sentT = millis(); break; }
+      }
+      if (scanIdx >= (int)scanList.size() && millis() - sentT > 1000) { scanIdx = -1; toast("SCAN DONE - NOTHING PICKED", 1600); }
+    }
+    if (sendAllIdx >= 0 && millis() - sendAllT > 500) {
+      sendAllT = millis();
+      if (sendAllIdx >= (int)irSigs.size()) { sendAllIdx = -1; toast("ALL SENT"); return; }
+      fsel = sendAllIdx;
+      String r = sendIrSig(irSigs[sendAllIdx++]);
+      if (r.length()) { lastInfo = r; sentT = millis(); }
+    }
+  }
   bool key(const KeyEv& e) override {
     KeyCode k = e.nav();
     if (!inRemote) {
@@ -457,7 +544,7 @@ struct IRApp : App {
       if (k == K_DOWN) { brand = (brand + 1) % (NBR + 4); return true; }
       if (k == K_ENTER || k == K_RIGHT) {
         inRemote = true; btn = 0; msel = 0; fsel = 0; fileLevel = 0;
-        if (brand == NBR + 2) scanIrFiles();
+        if (brand == NBR + 2) { irDir = "/ir"; listIrDir(irDir); }
         if (brand == NBR + 3) { scanning = true; csel = 0; rxStart(); }
         return true;
       }
@@ -475,16 +562,54 @@ struct IRApp : App {
       if (e.is('x')) { caps.clear(); return true; }
       return false;
     }
-    if (brand == NBR + 2) {  // .ir files
+    if (brand == NBR + 2) {  // .ir files: folder browser
+      if (scanIdx >= 0) {  // power scan running
+        if (k == K_ENTER) {  // it worked: open that file
+          String hit = scanBase + "/" + scanList[std::max(0, scanIdx - 1)];
+          scanIdx = -1;
+          int sl = hit.lastIndexOf('/');
+          irDir = hit.substring(0, sl); listIrDir(irDir);
+          if (openIrFile(hit)) { fileLevel = 1; fsel = 0; for (int i = 0; i < (int)irSigs.size(); i++) if (isPowerName(irSigs[i].name)) { fsel = i; break; } }
+          toast("FOUND IT - FILE OPENED", 1500);
+          return true;
+        }
+        if (k == K_ESC || (e.code == K_CHAR && e.ch == ' ')) { scanIdx = -1; scanList.clear(); scanList.shrink_to_fit(); toast("SCAN STOPPED"); return true; }
+        if (k == K_LEFT) { scanIdx = std::max(0, scanIdx - 2); scanT = 0; return true; }  // go back one (resend)
+        return true;
+      }
+      if (sendAllIdx >= 0) { if (k == K_ESC || (e.code == K_CHAR && e.ch == ' ')) { sendAllIdx = -1; toast("STOPPED"); } return true; }
       int n = fileLevel == 0 ? irFiles.size() : irSigs.size();
-      if (k == K_ESC || k == K_LEFT) { if (fileLevel) { fileLevel = 0; fsel = fileSel0; } else inRemote = false; return true; }
+      if (k == K_ESC || k == K_LEFT) {
+        if (fileLevel) { fileLevel = 0; fsel = fileSel0; }
+        else if (irDir != "/ir") {  // up one folder, keep the cursor on the folder we came from
+          String from = irDir.substring(irDir.lastIndexOf('/') + 1) + "/";
+          irDir = irDir.substring(0, irDir.lastIndexOf('/')); listIrDir(irDir);
+          fsel = 0; for (int i = 0; i < (int)irFiles.size(); i++) if (irFiles[i] == from) fsel = i;
+        } else inRemote = false;
+        return true;
+      }
       if (k == K_UP && n) { fsel = (fsel + n - 1) % n; return true; }
       if (k == K_DOWN && n) { fsel = (fsel + 1) % n; return true; }
+      if (e.code == K_CHAR && (e.ch == '[' || e.ch == ']') && n) { fsel = constrain(fsel + (e.ch == '[' ? -8 : 8), 0, n - 1); return true; }  // page
       if (k == K_ENTER && n) {
-        if (fileLevel == 0) { if (openIrFile(irFiles[fsel])) { fileSel0 = fsel; fileLevel = 1; fsel = 0; } else toast("CAN'T OPEN FILE"); }
+        if (fileLevel == 0) {
+          const String& it = irFiles[fsel];
+          if (it.endsWith("/")) { irDir += "/" + it.substring(0, it.length() - 1); listIrDir(irDir); fsel = 0; }
+          else if (openIrFile(irDir + "/" + it)) { fileSel0 = fsel; fileLevel = 1; fsel = 0; }
+          else toast("CAN'T OPEN FILE");
+        }
         else { String r = sendIrSig(irSigs[fsel]); if (r.length()) { lastInfo = r; sentT = millis(); } else toast("PROTOCOL NOT SUPPORTED"); }
         return true;
       }
+      if (e.is('p') && fileLevel == 0) {
+        scanList.clear(); scanBase = irDir;
+        scanCollect(irDir, "", 2);
+        if (scanList.empty()) { toast("NO .IR FILES HERE"); return true; }
+        std::sort(scanList.begin(), scanList.end(), [](const String& a, const String& b) { return a.compareTo(b) < 0; });
+        scanIdx = 0; scanHits = 0; scanT = 0;
+        return true;
+      }
+      if (e.is('a') && fileLevel == 1 && n) { sendAllIdx = 0; sendAllT = 0; return true; }
       return false;
     }
     if (brand == NBR + 1) {  // macros
@@ -568,6 +693,19 @@ struct IRApp : App {
         textFit(97, y, l.c_str(), s ? T.white : (r == 0 && now - caps[0].t < 300 ? T.yel : T.grey), 136, false);
       }
       if (lastInfo.length() && now - sentT < 1500) { text(96, 106, "TX )))", T.red, 1, false); textFit(134, 106, lastInfo.c_str(), T.grey, 100, false); }
+      else if (n && csel < n && caps[csel].raw.size() > 2) {  // the signal itself: marks high, spaces low
+        const auto& rw = caps[csel].raw;
+        uint32_t tot = 0; for (auto t : rw) tot += t;
+        uint32_t acc = 0; int lx = 96;
+        for (size_t i = 0; i < rw.size(); i++) {
+          acc += rw[i];
+          int x = 96 + (int)((uint64_t)acc * 138 / std::max<uint32_t>(1, tot));
+          int y = (i & 1) ? 116 : 108;
+          cv.drawFastHLine(lx, y, std::max(1, x - lx), (i & 1) ? T.dim : T.yel);
+          cv.drawFastVLine(x, 108, 9, T.dim);
+          lx = x;
+        }
+      }
       if (inRemote) hintBar({{"OK", "RESEND"}, {"S", "SAVE .IR"}, {"G", "PIN"}, {"X", "CLEAR"}});
       else hintBar({{"^v", "BRAND"}, {"OK", "OPEN"}, {"ESC", "BACK"}});
       return;
@@ -575,21 +713,48 @@ struct IRApp : App {
     if (brand == NBR + 2) {
       panel(91, 15, 146, 108, T.edge, T.bar);
       bool lvl = fileLevel == 1;
-      textFit(96, 19, lvl ? irFileOpen.c_str() : "/IR/*.IR (FLIPPER FORMAT)", T.grey, 136, false);
+      String hdr = lvl ? irFileOpen.substring(irFileOpen.lastIndexOf('/') + 1) : irDir.substring(1) + "/";
+      hdr.toUpperCase(); hdr.replace(".IR", "");
+      textFit(96, 19, hdr.c_str(), T.grey, 136, false);
+      if (scanIdx >= 0) {  // power scan screen
+        char b[40];
+        int tot = scanList.size(), at = std::min(scanIdx, tot);
+        text(96, 32, "POWER SCAN", T.yel, 1, false);
+        snprintf(b, sizeof(b), "%d / %d FILES", at, tot); text(96, 44, b, T.white, 1, false);
+        cv.fillRect(96, 56, 136, 4, T.dim);
+        cv.fillRect(96, 56, tot ? 136 * at / tot : 0, 4, T.yel);
+        String nm = scanNow; nm.toUpperCase(); nm.replace(".IR", "");
+        textFit(96, 66, nm.c_str(), millis() - sentT < 200 ? T.red : T.cyan, 136, false);
+        text(96, 80, "POINT AT THE DEVICE.", T.dim, 1, false);
+        text(96, 90, "DID IT TURN ON/OFF?", T.dim, 1, false);
+        text(96, 104, "OK = YES, THAT ONE", T.green, 1, false);
+        hintBar({{"OK", "FOUND"}, {"<", "BACK ONE"}, {"SPC", "STOP"}});
+        return;
+      }
       int n = lvl ? irSigs.size() : irFiles.size();
-      if (!n) { text(96, 40, lvl ? "NO SIGNALS" : "NO .IR FILES YET", T.white, 1, false); text(96, 52, "COPY FLIPPER-IRDB", T.dim, 1, false); text(96, 62, "FILES INTO /IR", T.dim, 1, false); }
+      if (!n) { text(96, 40, lvl ? "NO SIGNALS" : "NO .IR FILES HERE", T.white, 1, false); text(96, 52, "COPY FLIPPER-IRDB", T.dim, 1, false); text(96, 62, "FILES INTO /IR", T.dim, 1, false); }
       int tp = std::max(0, fsel - 5);
       for (int r = 0; r < 6 && tp + r < n; r++) {
         int i = tp + r, y = 31 + r * 11;
         bool s = inRemote && i == fsel;
-        if (s) { cv.fillRect(93, y - 2, 142, 11, lerpc(T.panel, T.cyan, 0.25f)); frame(93, y - 2, 142, 11, T.cyan); }
+        bool dir = !lvl && irFiles[i].endsWith("/");
+        uint16_t ac = lvl && isPowerName(irSigs[i].name) ? T.red : T.cyan;
+        if (s) { cv.fillRect(93, y - 2, 142, 11, lerpc(T.panel, ac, 0.25f)); frame(93, y - 2, 142, 11, ac); }
         String lbl = lvl ? irSigs[i].name : irFiles[i];
-        if (!lvl) { lbl.toUpperCase(); lbl.replace(".IR", ""); }
-        textFit(98, y, lbl.c_str(), s ? T.white : T.grey, 132, false);
+        if (!lvl) { lbl.toUpperCase(); lbl.replace(".IR", ""); if (dir) lbl = "> " + lbl.substring(0, lbl.length() - 1); }
+        textFit(98, y, lbl.c_str(), s ? T.white : (dir ? T.yel : T.grey), 132, false);
       }
+      if (n > 6) {  // scroll bar
+        int h = std::max(6, 66 * 6 / n), y = 29 + (66 - h) * fsel / std::max(1, n - 1);
+        cv.fillRect(234, 29, 1, 66, T.dim); cv.fillRect(233, y, 3, h, T.cyan);
+      }
+      if (!lvl && irMore) { char b[24]; snprintf(b, sizeof(b), "+%d NOT SHOWN", irMore); text(96, 100, b, T.dim, 1, false); }
       if (lastInfo.length() && lvl) { text(96, 100, millis() - sentT < 200 ? "TX )))" : "TX", T.red, 1, false); textFit(134, 100, lastInfo.c_str(), T.grey, 100, false); }
-      if (inRemote) hintBar({{"^v", lvl ? "SIGNAL" : "FILE"}, {"OK", lvl ? "SEND" : "OPEN"}, {"ESC", "BACK"}});
-      else hintBar({{"^v", "BRAND"}, {"OK", "OPEN"}, {"ESC", "BACK"}});
+      if (sendAllIdx >= 0) { char b[24]; snprintf(b, sizeof(b), "SENDING ALL %d/%d", sendAllIdx, n); text(96, 111, b, T.yel, 1, false); }
+      if (!inRemote) hintBar({{"^v", "BRAND"}, {"OK", "OPEN"}, {"ESC", "BACK"}});
+      else if (sendAllIdx >= 0) hintBar({{"SPC", "STOP"}});
+      else if (lvl) hintBar({{"OK", "SEND"}, {"A", "SEND ALL"}, {"[]", "PAGE"}, {"ESC", "BACK"}});
+      else hintBar({{"OK", "OPEN"}, {"P", "POWER SCAN"}, {"[]", "PAGE"}, {"ESC", "UP"}});
       return;
     }
     if (brand == NBR + 1) {

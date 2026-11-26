@@ -2,32 +2,88 @@
 #include "common.h"
 #include "audio.h"
 
-int loadScore(const char* key) {
-  File f = SD.open("/waveos/scores.txt");
-  if (!f) return 0;
-  int v = 0;
-  String k = String(key) + "=";
-  while (f.available()) {
-    String l = f.readStringUntil('\n');
-    if (l.startsWith(k)) v = l.substring(k.length()).toInt();
+// ---- background SD writes: the card can take seconds per file, so whole files are queued here and
+// written by a short-lived low priority task (a newer write of the same file replaces a queued one)
+struct SdJob { String path; String* data; };
+static std::vector<SdJob> sdJobs;
+static SemaphoreHandle_t sdJobMx = nullptr;
+static volatile bool sdJobRun = false;
+static void sdJobTask(void*) {
+  for (;;) {
+    xSemaphoreTake(sdJobMx, portMAX_DELAY);
+    if (sdJobs.empty()) { sdJobRun = false; xSemaphoreGive(sdJobMx); break; }
+    SdJob j = sdJobs.front(); sdJobs.erase(sdJobs.begin());
+    xSemaphoreGive(sdJobMx);
+    uint32_t t0 = millis();
+    File f = SD.open(j.path, FILE_WRITE);
+    uint32_t t1 = millis();
+    if (f) {  // in small pieces so the music decoder can read the card in between
+      const uint8_t* p = (const uint8_t*)j.data->c_str();
+      size_t n = j.data->length();
+      for (size_t o = 0; o < n; o += 512) { f.write(p + o, std::min<size_t>(512, n - o)); vTaskDelay(1); }
+      f.close();
+    }
+    Serial.printf("[perf] wrote %s (%u B) open=%ums total=%ums (background)\n", j.path.c_str(), (unsigned)j.data->length(), (unsigned)(t1 - t0), (unsigned)(millis() - t0));
+    delete j.data;
   }
-  f.close();
-  return v;
+  vTaskDelete(nullptr);
 }
-void saveScore(const char* key, int val) {
-  if (!sdOK) return;
-  std::vector<String> lines;
+void sdWriteAsync(const char* path, String* data) {
+  if (!sdOK) { delete data; return; }
+  if (!sdJobMx) sdJobMx = xSemaphoreCreateMutex();
+  xSemaphoreTake(sdJobMx, portMAX_DELAY);
+  bool replaced = false;
+  for (auto& j : sdJobs) if (j.path == path) { delete j.data; j.data = data; replaced = true; }
+  if (!replaced) sdJobs.push_back({String(path), data});
+  bool start = !sdJobRun;
+  if (start) sdJobRun = true;
+  xSemaphoreGive(sdJobMx);
+  if (start && xTaskCreatePinnedToCore(sdJobTask, "sdwrite", 4096, nullptr, 1, nullptr, 0) != pdPASS) sdJobTask(nullptr);
+}
+bool sdWriteBusy() { return sdJobRun; }
+
+// ---- new best: a short fanfare + toast, played from loop() so it doesn't clash with the game over sound
+static uint32_t fanfareT = 0;
+void scoreTick() {
+  if (!fanfareT) return;
+  static const uint16_t notes[4] = {784, 988, 1175, 1568};
+  uint32_t el = millis() - fanfareT;
+  static int done = 0;
+  if (el < 250) { done = 0; return; }
+  while (done < 4 && el >= 250 + done * 110u) { Audio::blip(notes[done], done == 3 ? 220 : 90, Audio::W_SQUARE, 0.35f); done++; }
+  if (done >= 4) fanfareT = 0;
+}
+
+// all scores live in RAM after the first read; saving rewrites the file in the background
+static std::vector<std::pair<String, int>> scores;
+static bool scoresLoaded = false;
+static void loadScores() {
+  if (scoresLoaded) return;
+  scoresLoaded = true;
   File f = SD.open("/waveos/scores.txt");
-  String k = String(key) + "=";
-  if (f) {
-    while (f.available()) { String l = f.readStringUntil('\n'); l.trim(); if (l.length() && !l.startsWith(k)) lines.push_back(l); }
-    f.close();
-  }
-  lines.push_back(k + String(val));
-  f = SD.open("/waveos/scores.txt", FILE_WRITE);
   if (!f) return;
-  for (auto& l : lines) f.println(l);
+  while (f.available()) {
+    String l = f.readStringUntil('\n'); l.trim();
+    int e = l.indexOf('=');
+    if (e > 0) scores.push_back({l.substring(0, e), (int)l.substring(e + 1).toInt()});
+  }
   f.close();
+}
+int loadScore(const char* key) {
+  loadScores();
+  for (auto& c : scores) if (c.first == key) return c.second;
+  return 0;
+}
+void saveScore(const char* key, int val, bool isBest) {
+  if (!sdOK) return;
+  loadScores();
+  bool found = false;
+  for (auto& c : scores) if (c.first == key) { c.second = val; found = true; }
+  if (!found) scores.push_back({String(key), val});
+  String* out = new String();
+  for (auto& c : scores) { *out += c.first; *out += '='; *out += String(c.second); *out += "\r\n"; }
+  sdWriteAsync("/waveos/scores.txt", out);
+  if (isBest && val > 0) { toast("NEW BEST!", 1600); fanfareT = millis(); }
 }
 static KeyCode dirKey(const KeyEv& e) {
   KeyCode k = e.nav();
@@ -152,15 +208,22 @@ struct SnakeApp : App {
 // ===================================================================== 2048
 struct G2048App : App {
   int g[4][4], ug[4][4];
-  int score = 0, uscore = 0, best = 0;
+  int score = 0, uscore = 0, best = 0, saved = 0;
   bool over = false, won = false, keepGoing = false, canUndo = false;
-  uint32_t popT = 0;
-  int popX = -1, popY = -1;
+  // animation: tiles slide from where they were (90ms), merged tiles pop, the new tile grows in
+  struct Mv { int8_t fx, fy, tx, ty; int v; };
+  Mv mv[16]; int nmv = 0;
+  bool merged[4][4];
+  uint32_t animT = 0;
+  int popX = -1, popY = -1, gain = 0;
+  static constexpr uint32_t SLIDE_MS = 90;
   G2048App() { name = "MERGE"; }
-  void enter() override { best = loadScore("2048"); if (!score && !over) reset(); }
+  void enter() override { best = saved = loadScore("2048"); if (!score && !over) reset(); }
+  void leave() override { saveBest(); }
+  void saveBest() { if (best > saved) { saved = best; saveScore("2048", best); } }
   void reset() {
-    memset(g, 0, sizeof(g));
-    score = 0; over = false; won = false; keepGoing = false; canUndo = false;
+    memset(g, 0, sizeof(g)); memset(merged, 0, sizeof(merged));
+    score = 0; over = false; won = false; keepGoing = false; canUndo = false; nmv = 0; gain = 0;
     spawn(); spawn();
   }
   void spawn() {
@@ -168,25 +231,30 @@ struct G2048App : App {
     for (auto& r : g) for (int v : r) if (!v) empty++;
     if (!empty) return;
     int k = random(empty);
-    for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++) if (!g[y][x] && k-- == 0) { g[y][x] = random(10) ? 2 : 4; popX = x; popY = y; popT = millis(); }
+    for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++) if (!g[y][x] && k-- == 0) { g[y][x] = random(10) ? 2 : 4; popX = x; popY = y; }
   }
   bool slide(int dx, int dy) {
     bool moved = false;
+    nmv = 0; memset(merged, 0, sizeof(merged));
     for (int line = 0; line < 4; line++) {
-      int vals[4], n = 0;
-      for (int i = 0; i < 4; i++) {
-        int idx = (dx > 0 || dy > 0) ? 3 - i : i;
-        int x = dx ? idx : line, y = dx ? line : idx;
-        if (g[y][x]) vals[n++] = g[y][x];
-      }
+      int vals[4], src[4], n = 0;
+      auto at = [&](int i, int& x, int& y) { int idx = (dx > 0 || dy > 0) ? 3 - i : i; x = dx ? idx : line; y = dx ? line : idx; };
+      for (int i = 0; i < 4; i++) { int x, y; at(i, x, y); if (g[y][x]) { vals[n] = g[y][x]; src[n++] = i; } }
       int out[4] = {0, 0, 0, 0}, m = 0;
       for (int i = 0; i < n; i++) {
-        if (i + 1 < n && vals[i] == vals[i + 1]) { out[m++] = vals[i] * 2; score += vals[i] * 2; if (vals[i] * 2 == 2048) won = true; i++; }
-        else out[m++] = vals[i];
+        int tx, ty; at(m, tx, ty);
+        int fx, fy;
+        at(src[i], fx, fy); mv[nmv++] = {(int8_t)fx, (int8_t)fy, (int8_t)tx, (int8_t)ty, vals[i]};
+        if (i + 1 < n && vals[i] == vals[i + 1]) {
+          at(src[i + 1], fx, fy); mv[nmv++] = {(int8_t)fx, (int8_t)fy, (int8_t)tx, (int8_t)ty, vals[i]};
+          out[m] = vals[i] * 2; score += vals[i] * 2; merged[ty][tx] = true;
+          if (vals[i] * 2 == 2048) won = true;
+          i++;
+        } else out[m] = vals[i];
+        m++;
       }
       for (int i = 0; i < 4; i++) {
-        int idx = (dx > 0 || dy > 0) ? 3 - i : i;
-        int x = dx ? idx : line, y = dx ? line : idx;
+        int x, y; at(i, x, y);
         if (g[y][x] != out[i]) moved = true;
         g[y][x] = out[i];
       }
@@ -202,8 +270,8 @@ struct G2048App : App {
     return false;
   }
   bool key(const KeyEv& e) override {
-    if (e.is('u') && canUndo) { memcpy(g, ug, sizeof(g)); score = uscore; over = false; canUndo = false; return true; }
-    if (e.is('n')) { reset(); return true; }
+    if (e.is('u') && canUndo) { memcpy(g, ug, sizeof(g)); score = uscore; over = false; canUndo = false; nmv = 0; popX = -1; return true; }
+    if (e.is('n')) { saveBest(); reset(); return true; }
     if (over || (won && !keepGoing)) {
       if (e.code == K_ENTER) { if (won && !over) keepGoing = true; else reset(); return true; }
       return false;
@@ -216,33 +284,56 @@ struct G2048App : App {
     if (slide(dx, dy)) {
       memcpy(ug, tg, sizeof(g)); uscore = ts; canUndo = true;
       spawn();
-      Audio::blip(score > ts ? 660 : 330, 30, Audio::W_TRI);
-      if (score > best) { best = score; }
-      if (!anyMove()) { over = true; saveScore("2048", best); Audio::blip(150, 300, Audio::W_SAW); }
-    }
+      animT = millis(); gain = score - ts;
+      Audio::blip(score > ts ? 520 + std::min(8, (int)log2f(std::max(1, gain))) * 60 : 330, 30, Audio::W_TRI);
+      if (score > best) best = score;
+      if (!anyMove()) { over = true; saveBest(); Audio::blip(150, 300, Audio::W_SAW); }
+    } else nmv = 0;
     return true;
   }
   uint16_t tileCol(int v) {
     int l = 0; while (v > 1) { v >>= 1; l++; }
     if (l <= 0) return T.bg2;
-    return l >= 11 ? T.yel : gradc((l - 1) / 10.f);
+    if (cfg.mono) return lerpc(T.dim, T.white, std::min(l, 11) / 11.f);
+    static const uint16_t pal[11] = {0x6B6D, 0x8C51, 0x2D9F, 0x1C9F, 0x5A3F, 0x981F, 0xF80F, 0xFA20, 0xFC40, 0xFEA0, 0xFFE0};
+    return pal[std::min(l, 11) - 1];
+  }
+  void tile(int px, int py, int ts, int v, int inset) {
+    uint16_t c = tileCol(v);
+    int w = ts - inset * 2;
+    if (w <= 2) return;
+    cv.fillRoundRect(px + inset, py + inset, w, w, 3, c);
+    cv.drawFastHLine(px + inset + 2, py + inset, w - 4, lerpc(c, T.white, 0.45f));
+    cv.drawFastHLine(px + inset + 2, py + inset + w - 1, w - 4, lerpc(c, T.bg0, 0.45f));
+    if (w < ts - 6) return;
+    char b[8]; snprintf(b, sizeof(b), "%d", v);
+    int sc = v < 100 ? 2 : 1;
+    textC(px + ts / 2, py + ts / 2 - (sc == 2 ? 7 : 3), b, T.white, sc, true);
   }
   void draw() override {
     background();
     statusBar("MERGE", T.blue);
     int ts = 26, gx = 8, gy = 16;
     panel(gx - 3, gy - 3, 4 * (ts + 2) + 4, 4 * (ts + 2) + 4, T.blueD, T.bg0);
-    for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++) {
-      int v = g[y][x];
-      int px = gx + x * (ts + 2), py = gy + y * (ts + 2);
-      int inset = (x == popX && y == popY && millis() - popT < 120) ? 5 : 0;
-      if (!v) { cv.fillRect(px, py, ts, ts, T.bar); continue; }
-      uint16_t c = tileCol(v);
-      cv.fillRect(px + inset, py + inset, ts - inset * 2, ts - inset * 2, c);
-      cv.drawFastHLine(px + inset, py + inset, ts - inset * 2, lerpc(c, T.white, 0.4f));
-      cv.drawFastHLine(px + inset, py + ts - 1 - inset, ts - inset * 2, lerpc(c, T.bg0, 0.4f));
-      char b[8]; snprintf(b, sizeof(b), "%d", v);
-      textC(px + ts / 2, py + ts / 2 - 3, b, v >= 8 ? T.white : T.bg0, 1, v >= 8);
+    uint32_t el = millis() - animT;
+    bool sliding = nmv && el < SLIDE_MS;
+    for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++) cv.fillRoundRect(gx + x * (ts + 2), gy + y * (ts + 2), ts, ts, 3, T.bar);
+    if (sliding) {
+      float t = el / (float)SLIDE_MS; t = 1 - (1 - t) * (1 - t);  // ease out
+      for (int i = 0; i < nmv; i++) {
+        float fx = mv[i].fx + (mv[i].tx - mv[i].fx) * t, fy = mv[i].fy + (mv[i].ty - mv[i].fy) * t;
+        tile(gx + (int)lroundf(fx * (ts + 2)), gy + (int)lroundf(fy * (ts + 2)), ts, mv[i].v, 0);
+      }
+    } else {
+      uint32_t ae = el - SLIDE_MS;  // time since the slide ended
+      for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++) {
+        int v = g[y][x];
+        if (!v) continue;
+        int inset = 0;
+        if (merged[y][x] && ae < 120) inset = -(int)(2 * sinf(PI * ae / 120.f));      // pop
+        if (x == popX && y == popY && ae < 120) inset = (int)(ts / 2 * (1 - ae / 120.f));  // grow in
+        tile(gx + x * (ts + 2), gy + y * (ts + 2), ts, v, inset);
+      }
     }
     int sx = 128;
     char b[16];
@@ -250,12 +341,18 @@ struct G2048App : App {
     text(sx + 6, 19, "SCORE", T.grey);
     snprintf(b, sizeof(b), "%d", score);
     text(sx + 6, 30, b, T.white, 2);
+    if (gain > 0 && el < 600) {  // +points float up
+      snprintf(b, sizeof(b), "+%d", gain);
+      text(sx + 102 - textW(b), 30 - (int)(el / 60), b, lerpc(T.yel, T.panel, el / 600.f), 1, false);
+    }
     panel(sx, 52, 108, 22, T.blueD);
     text(sx + 6, 56, "BEST", T.grey);
     snprintf(b, sizeof(b), "%d", best);
-    text(sx + 40, 56, b, T.yel);
+    text(sx + 40, 56, b, score >= best && score ? T.green : T.yel);
     panel(sx, 77, 108, 46, T.blueD);
-    text(sx + 6, 81, "ARROWS/WASD", T.grey, 1, false);
+    int big = 0; for (auto& r : g) for (int v : r) big = std::max(big, v);
+    snprintf(b, sizeof(b), "TOP TILE %d", big);
+    text(sx + 6, 81, b, tileCol(big), 1, false);
     text(sx + 6, 92, "U  UNDO", canUndo ? T.cyan : T.dim, 1, false);
     text(sx + 6, 103, "N  NEW GAME", T.grey, 1, false);
     if (over || (won && !keepGoing)) {
