@@ -64,8 +64,6 @@ struct MeterApp : App {
   float hz = 0;
   int logic = 0;            // 0 LOW, 1 HIGH, 2 FLOATING, 3 TOGGLING
   const char* note = "";    // short advice under the reading
-  // CSV log on the SD card
-  bool logging = false; String logPath, logBuf; uint32_t logT0 = 0, logFlushT = 0, logRows = 0;
   static constexpr float DIVS[3] = {1, 2, 11};
   static constexpr int REFS[3] = {1000, 10000, 100000};
   MeterApp() { name = "METER"; }
@@ -90,7 +88,7 @@ struct MeterApp : App {
   }
   void resetStats() { vmin = 1e9f; vmax = -1e9f; vsum = 0; vn = 0; tn = 0; }
   void enter() override { setup(); }
-  void leave() override { pinsOff(); if (logging) logStop(); }
+  void leave() override { pinsOff(); }
 
   int readMv(int n = 32) {  // averaged, calibrated millivolts on the probe pin
     uint32_t s = 0;
@@ -246,38 +244,6 @@ struct MeterApp : App {
     if (valid) { vmin = std::min(vmin, val); vmax = std::max(vmax, val); vsum += val; vn++; }
     if (tn < 200) trace[tn++] = valid ? val : NAN;
     else { memmove(trace, trace + 1, sizeof(float) * 199); trace[199] = valid ? val : NAN; }
-    if (logging) logAdd(valid);
-  }
-  // ---- CSV log: /meter/logNNN.csv, time in seconds + value, written every 2 s
-  void logStart() {
-    if (!sdOK) { toast("NO SD CARD"); return; }
-    ensureDir("/meter");
-    char p[32]; int n = 1;
-    do { snprintf(p, sizeof(p), "/meter/log%03d.csv", n++); } while (SD.exists(p) && n < 1000);
-    logPath = p; logBuf = "";
-    static const char* U[M_N] = {"volts", "ohms", "volts", "farads", "hz", "volts"};
-    File f = SD.open(logPath, FILE_WRITE);
-    if (!f) { toast("CAN'T WRITE LOG"); return; }
-    f.printf("seconds,%s\n", U[mode]); f.close();
-    logging = true; logT0 = logFlushT = millis(); logRows = 0;
-    char b[32]; snprintf(b, sizeof(b), "LOGGING TO %s", p + 7); toast(b, 1400);
-  }
-  void logFlush() {
-    if (!logBuf.length()) return;
-    File f = SD.open(logPath, FILE_APPEND);
-    if (f) { f.print(logBuf); f.close(); }
-    logBuf = "";
-  }
-  void logStop() { logFlush(); logging = false; char b[32]; snprintf(b, sizeof(b), "SAVED %u ROWS", (unsigned)logRows); toast(b, 1400); }
-  void logAdd(bool valid) {
-    static uint32_t lastRow = 0;
-    if (millis() - lastRow < 200) return;  // 5 rows per second
-    lastRow = millis();
-    char l[40];
-    if (valid) snprintf(l, sizeof(l), "%.2f,%g\n", (millis() - logT0) / 1000.f, val);
-    else snprintf(l, sizeof(l), "%.2f,\n", (millis() - logT0) / 1000.f);
-    logBuf += l; logRows++;
-    if (millis() - logFlushT > 2000) { logFlushT = millis(); logFlush(); }
   }
   void tick() override {
     if (hold) return;
@@ -312,7 +278,6 @@ struct MeterApp : App {
       else if (!open && !over) { relV = val; rel = true; toast("REL: ZEROED", 700); }
       resetStats(); return true;
     }
-    if (e.is('l')) { if (logging) logStop(); else logStart(); return true; }
     if (e.is('b')) { beep = !beep; toast(beep ? "CONTINUITY BEEP ON" : "BEEP OFF", 800); return true; }
     if (e.code == K_CHAR && e.ch == '?') { help = true; return true; }
     return false;
@@ -471,7 +436,6 @@ struct MeterApp : App {
     int by = 31;
     if (hold) { text(210, by, "HOLD", (millis() / 400) % 2 ? T.yel : T.dim, 1, false); by += 10; }
     if (rel) { text(216, by, "REL", T.cyan, 1, false); by += 10; }
-    if (logging) { cv.fillCircle(214, by + 3, 2, (millis() / 500) % 2 ? T.red : T.dim); text(219, by, "REC", T.red, 1, false); }
     // left: range / details
     if (mode == M_VOLT) snprintf(u, sizeof(u), "X%d", (int)DIVS[div]);
     else if (usesDrive()) snprintf(u, sizeof(u), "REF %dK", REFS[ref] / 1000);
@@ -513,10 +477,10 @@ struct MeterApp : App {
     else if (mode == M_LOGIC) snprintf(wire, sizeof(wire), "PROBE G%d (%s)  3.3V LOGIC", P, MPINS[probe].where);
     else snprintf(wire, sizeof(wire), "CARDPUTER BATTERY");
     textC(120, 112, wire, T.dim, 1, false);
-    hintBar({{"<>", "MODE"}, {"ENT", "HOW TO"}, {"R", usesDrive() ? "REF" : "RANGE"}, {"L", logging ? "STOP" : "LOG"}, {"?", "KEYS"}});
+    hintBar({{"<>", "MODE"}, {"ENT", "HOW TO"}, {"R", usesDrive() ? "REF" : "RANGE"}, {"0", "REL"}, {"?", "KEYS"}});
     if (help)
       helpOverlay("METER", {"<> TAB 1-6  MODE", "ENTER  HOW TO WIRE IT", "P  PROBE PIN", "D  DRIVE PIN", "M  EXT PIN MAP", "R ^v  RANGE / REF", "0  REL (ZERO)",
-                            "H SPC  HOLD", "Z  RESET MIN/MAX", "L  LOG CSV TO SD", "B  CONTINUITY BEEP", "PINS  G1 G2 GROVE", "EXT  G3 G4 G5 G6 G13 G15",
+                            "H SPC  HOLD", "Z  RESET MIN/MAX", "B  CONTINUITY BEEP", "PINS  G1 G2 GROVE", "EXT  G3 G4 G5 G6 G13 G15",
                             "GND  EXT PIN 4", "REF  1K 10K 100K", "X2  TWO SAME RESISTORS", "X11  100K + 10K", "CAP  1.5NF - 1500UF",
                             "MAX 3.3V ON ANY PIN", "5V PINS: NEVER ON A PROBE"});
   }
