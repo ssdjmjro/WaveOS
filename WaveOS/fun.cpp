@@ -56,7 +56,13 @@ struct SudokuApp : App {
     }
     return false;
   }
-  void enter() override { best = loadScore("sudoku"); static bool g = false; if (!g || won) { g = true; gen(); } }
+  bool started = false;
+  const char* saveKey() override { return "sudoku"; }
+  void persist(Persist& p) override {
+    p.io(sol); p.io(grid); p.io(given); p.io(cur); p.io(level); p.io(won); p.io(check); p.io(started);
+    uint32_t now = millis(); p.clock(t0, won && !p.loading ? tEnd : now); if (p.loading && won) tEnd = now;
+  }
+  void enter() override { best = loadScore("sudoku"); if (!started || won) { started = true; gen(); } }
   bool key(const KeyEv& e) override {
     if (won) { if (e.code == K_ENTER) { gen(); return true; } return e.code != K_ESC; }
     KeyCode k = fdir(e);
@@ -124,7 +130,13 @@ struct WordsApp : App {
   bool used[26];
   int state = 0;  // 0 playing, 1 won, 2 lost
   WordsApp() { name = "WORDS"; }
-  void next() { cat = random(6); word = cats[cat].w[random(16)]; wrong = 0; memset(used, 0, sizeof(used)); state = 0; }
+  int widx = -1;
+  void next() { cat = random(6); widx = random(16); word = cats[cat].w[widx]; wrong = 0; memset(used, 0, sizeof(used)); state = 0; }
+  const char* saveKey() override { return "words"; }
+  void persist(Persist& p) override {
+    p.io(cat); p.io(widx); p.io(wrong); p.io(used); p.io(state);
+    if (p.loading) { cat = constrain(cat, 0, 5); word = widx >= 0 && widx < 16 ? cats[cat].w[widx] : ""; }
+  }
   void enter() override { if (!word.length()) next(); streak = loadScore("words"); }
   bool solved() { for (char c : word) if (!used[c - 'A']) return false; return true; }
   bool wantsAllKeys() override { return true; }
@@ -279,6 +291,8 @@ struct DoodleApp : App {
   int cx = 24, cy = 11, col = 1;
   bool pen = false;
   DoodleApp() { name = "DOODLE"; memset(px, 0, sizeof(px)); }
+  const char* saveKey() override { return "doodle"; }
+  void persist(Persist& p) override { p.io(px); p.io(cx); p.io(cy); p.io(col); }
   uint16_t pal(int i) {
     static const uint16_t P[10] = {0, RGB(240, 240, 240), RGB(255, 80, 100), RGB(255, 170, 60), RGB(255, 220, 80), RGB(90, 220, 120),
                                    RGB(62, 232, 240), RGB(74, 140, 255), RGB(154, 92, 255), RGB(255, 120, 200)};

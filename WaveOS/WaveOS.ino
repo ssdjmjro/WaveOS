@@ -9,6 +9,8 @@
 #include <SPI.h>
 #include <esp_sleep.h>
 #include <esp_system.h>
+#include <esp_core_dump.h>
+#include <driver/gpio.h>
 #include <new>
 
 SET_LOOP_TASK_STACK_SIZE(12 * 1024);
@@ -124,11 +126,11 @@ void memLog(const char* where) {
 void openApp(App* a) {
   if (!a || a == cur) return;
   uint32_t t0 = millis();
-  if (cur) cur->leave();
+  if (cur) { if (cur->stateDirty) appStateSave(cur); cur->leave(); }
   uint32_t t1 = millis();
   App* from = cur;
   cur = a;
-  try { cur->enter(); }
+  try { appStateLoad(cur); cur->enter(); }
   catch (std::bad_alloc&) { char b[40]; snprintf(b, sizeof(b), "OUT OF MEMORY (%uK)", (unsigned)(ESP.getMaxAllocHeap() / 1024)); toast(b, 2500); memLog("oom-open"); cur = appHome; }
   uint32_t t2 = millis();
   if (t2 - t0 > 80) Serial.printf("[perf] slow switch %s leave=%ums -> %s enter=%ums\n", from ? from->name : "-", (unsigned)(t1 - t0), cur->name, (unsigned)(t2 - t1));
@@ -169,7 +171,7 @@ struct HomeApp : App {
       case 1: return Looper::playing ? "LOOPER RUNNING" : "ARP CHORDS LOOPER";
       case 2: return Drums::playing ? "BEAT RUNNING" : "16 STEP DRUM MACHINE";
       case 3: return "TV  LEARN  RECEIVE  .IR";
-      case 4: return "CALC CONVERT DECIDE";
+      case 4: return "CALC METER DECIDE";
       case 5: return "MARKDOWN ON SD";
       case 6: return "17 GAMES";
       case 7: return "13 QUIET GAMES + TOYS";
@@ -187,7 +189,7 @@ struct HomeApp : App {
                               {"MAZE", "z"}, {"FOUR", "4"}, {"TANKS", "k"}, {"ROCKS", "q"}, {"HOPPER", "p"},
                               {"SUDOKU", "1"}, {"WORDS", "2"}, {"PET", "3"}, {"DOODLE", "5"}, {"TIC TAC TOE", "6"}, {"BUBBLES", "7"}, {"ORACLE", "8"},
                               {"FLASHLIGHT", "l"}, {"MORSE", "o"}, {"FIVE", ""}, {"CODE", ""}, {"LIGHTS", ""}, {"SLIDE", ""},
-                              {"REFLEX", ""}, {"LIFE", ""}, {"METRONOME", ""}, {"LEVEL", ""}, {"CONVERT", ""}, {"DECIDE", ""}};
+                              {"REFLEX", ""}, {"LIFE", ""}, {"METRONOME", ""}, {"LEVEL", ""}, {"CONVERT", ""}, {"DECIDE", ""}, {"METER", ""}, {"MULTIMETER", ""}, {"VOLTMETER", ""}};
     for (int i = 0; i < (int)(sizeof(extra) / sizeof(extra[0])); i++) { String n = extra[i][0]; n.toLowerCase(); if (n.indexOf(lq) >= 0) res.push_back({3, i, String("APP  ") + extra[i][0]}); }
     std::vector<int> songs;
     searchSongs(q, songs, 6);
@@ -205,7 +207,7 @@ struct HomeApp : App {
       App* sub[] = {appCalc, appGraph, appResistor, appElec, appTimer, appSnake, app2048, appBlocks, appBreakout, appFlappy, appTyping, appRhythm,
                     appStarfall, appMines, appDuel, appEcho, appRunner, appMaze, appFour, appTanks, appRocks, appHopper,
                     appSudoku, appWords, appPet, appDoodle, appTtt, appBubbles, appOracle, appFlash, appMorse,
-                    appFive, appCode, appLights, appSlide, appReflex, appLife, appMetro, appLevel, appConvert, appDecide};
+                    appFive, appCode, appLights, appSlide, appReflex, appLife, appMetro, appLevel, appConvert, appDecide, appMeter, appMeter, appMeter};
       openApp(sub[r.idx]);
     }
   }
@@ -517,8 +519,15 @@ static void drawSaver() {
   snprintf(b, sizeof(b), "%d%%", Batt::pct);
   text(206, 4, b, T.dim, 1, false);
 }
-static void deepSleep() {
+static void saveEverything() {  // before sleeping: settings, the open app's progress, music position
   saveSettings();
+  if (cur && cur->saveKey()) appStateSave(cur);
+  extern void musicSaveNow(); musicSaveNow();
+  for (uint32_t t = millis(); sdWriteBusy() && millis() - t < 3000;) delay(10);  // let background writes finish
+}
+static void deepSleep() {
+  saveEverything();
+  if (sdOK) { File f = SD.open("/waveos/resume.txt", FILE_WRITE); if (f) { f.print(cur ? cur->name : ""); f.close(); } }
   cv.fillSprite(T.bg0);
   textC(120, 60, "SLEEPING - PRESS G0", T.grey);
   cv.pushSprite(0, 0);
@@ -527,6 +536,65 @@ static void deepSleep() {
   M5Cardputer.Display.sleep();
   esp_sleep_enable_ext0_wakeup(GPIO_NUM_0, 0);
   esp_deep_sleep_start();
+}
+
+// ---- SLEEP (Fn+L, and auto sleep): light sleep keeps everything in RAM, so every app continues exactly
+// where it was. The screen and backlight are off and the CPU is stopped (a few mA). Any key (Cardputer
+// ADV keyboard chip interrupt on GPIO11) or G0 wakes it. Every 20 min it wakes for a moment to check the
+// battery; after 3 h asleep (or a low battery) it saves and goes to deep sleep.
+static constexpr int KB_INT = 11, KB_ADDR = 0x34;
+static void kbDrain() {  // empty the keyboard chip's event queue so its INT line goes high again
+  for (int i = 0; i < 16; i++) if (!M5.In_I2C.readRegister8(KB_ADDR, 0x04, 400000)) break;
+  M5.In_I2C.writeRegister8(KB_ADDR, 0x02, 0x01, 400000);
+}
+static void pushFrame();
+static bool swallowKeys = false;  // after waking: ignore keys until all are released
+static void lightSleep() {
+  auto& D = M5Cardputer.Display;
+  bool adv = M5.getBoard() == m5::board_t::board_M5CardputerADV;
+  cv.fillSprite(T.bg0);
+  drawWave(40, 200, 58, 10, 0, true);
+  textC(120, 80, "SLEEPING", T.grey, 2);
+  textC(120, 100, adv ? "ANY KEY TO WAKE" : "PRESS G0 TO WAKE", T.dim);
+  pushFrame(); D.waitDisplay();
+  for (uint32_t t = millis(); millis() - t < 2000;) {  // wait until Fn+L is let go
+    M5Cardputer.update();
+    if (M5Cardputer.Keyboard.keyList().empty() && !M5Cardputer.BtnA.isPressed()) break;
+    delay(10);
+  }
+  if (Music::active() && !Music::paused()) Music::pause(true);
+  saveEverything();  // in case the battery runs out while sleeping
+  delay(150);        // music fade-out
+  for (int i = 8; i >= 0; i--) { D.setBrightness(cfg.bright * i / 8); delay(20); }
+  D.sleep(); D.waitDisplay();
+  Serial.flush();
+  uint32_t slept = 0;
+  for (;;) {
+    if (adv) kbDrain();
+    gpio_wakeup_enable(GPIO_NUM_0, GPIO_INTR_LOW_LEVEL);
+    if (adv) { gpio_intr_disable((gpio_num_t)KB_INT); gpio_wakeup_enable((gpio_num_t)KB_INT, GPIO_INTR_LOW_LEVEL); }
+    esp_sleep_enable_gpio_wakeup();
+    esp_sleep_enable_timer_wakeup(20ULL * 60 * 1000000);
+    esp_light_sleep_start();
+    esp_sleep_wakeup_cause_t why = esp_sleep_get_wakeup_cause();
+    gpio_wakeup_disable(GPIO_NUM_0);
+    if (adv) { gpio_wakeup_disable((gpio_num_t)KB_INT); gpio_set_intr_type((gpio_num_t)KB_INT, GPIO_INTR_ANYEDGE); gpio_intr_enable((gpio_num_t)KB_INT); }
+    esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
+    if (why != ESP_SLEEP_WAKEUP_TIMER) break;
+    slept += 20;
+    Batt::tick();
+    if (slept >= 180 || (!Batt::usb && Batt::pct >= 0 && Batt::mv > 2500 && Batt::mv < 3400)) { D.wakeup(); deepSleep(); }
+  }
+  if (adv) kbDrain();
+  swallowKeys = true;
+  D.wakeup();
+  invalidateFrame();
+  saver = false; screenOff = false;
+  lastInput = millis();
+  if (cur) cur->draw();
+  pushFrame(); D.waitDisplay();
+  for (int i = 1; i <= 8; i++) { D.setBrightness(cfg.bright * i / 8); delay(15); }
+  Serial.println("[waveos] woke up");
 }
 
 // ------------------------------------------------------------------ volume overlay + power management
@@ -637,7 +705,7 @@ void setup() {
                                    {"TIMER", "STOPWATCH", IC_TIMER, &appTimer}, {"METRONOME", "TAP TEMPO", IC_METRO, &appMetro},
                                    {"FLASHLIGHT", "LIGHT / SOS", IC_FLASH, &appFlash}, {"MORSE", "BEEP CODE", IC_MORSE, &appMorse},
                                    {"LEVEL", "TILT METER", IC_LEVEL, &appLevel}, {"CONVERT", "UNITS", IC_CONV, &appConvert},
-                                   {"DECIDE", "WHEEL + VS", IC_DECIDE, &appDecide}}, accYel);
+                                   {"DECIDE", "WHEEL + VS", IC_DECIDE, &appDecide}, {"METER", "VOLT OHM LOGIC", IC_METER, &appMeter}}, accYel);
   appGames = new MenuApp("GAMES", {{"STARFALL", "SHOOTER", IC_STARFALL, &appStarfall}, {"RUNNER", "ENDLESS", IC_RUNNER, &appRunner},
                                    {"SNAKE", "CLASSIC", IC_SNAKE, &appSnake}, {"BLOCKS", "LINE CLEAR", IC_BLOCKS, &appBlocks},
                                    {"MERGE", "NUMBERS", IC_2048, &app2048}, {"MINES", "LOGIC", IC_MINES, &appMines},
@@ -657,7 +725,7 @@ void setup() {
                                {"LIFE", "PIXEL LIFE", IC_LIFE, &appLife}}, accGreen);
   for (App* a : {appSudoku, appWords, appPet, appDoodle, appTtt, appBubbles, appOracle, appFive, appCode, appLights, appSlide, appReflex, appLife})
     a->parent = appFun;
-  for (App* a : {appCalc, appGraph, appResistor, appElec, appTimer, appMetro, appFlash, appMorse, appLevel, appConvert, appDecide}) a->parent = appTools;
+  for (App* a : {appCalc, appGraph, appResistor, appElec, appTimer, appMetro, appFlash, appMorse, appLevel, appConvert, appDecide, appMeter}) a->parent = appTools;
   for (App* a : {appSnake, app2048, appBlocks, appBreakout, appFlappy, appTyping, appRhythm, appStarfall, appMines, appDuel, appEcho, appRunner,
                  appMaze, appFour, appTanks, appRocks, appHopper})
     a->parent = appGames;
@@ -672,11 +740,44 @@ void setup() {
     if (why) {
       char b[40]; snprintf(b, sizeof(b), "LAST RESET: %s", why);
       toast(b, 4000);
-      if (sdOK) { File f = SD.open("/waveos/crash.txt", FILE_APPEND); if (f) { f.printf("reset=%d %s heap=%u\n", (int)rr, why, (unsigned)ESP.getFreeHeap()); f.close(); } }
+      if (sdOK) {
+        File f = SD.open("/waveos/crash.txt", FILE_APPEND);
+        if (f) {
+          f.printf("reset=%d %s v%s\n", (int)rr, why, FW_VER);
+          // where it happened (from the crash dump the chip keeps in flash): task, reason and the code
+          // addresses, which tools/crash.sh turns into file:line with the matching build
+          static esp_core_dump_summary_t sm;
+          char reason[120] = "";
+          if (esp_core_dump_get_summary(&sm) == ESP_OK) {
+            esp_core_dump_get_panic_reason(reason, sizeof(reason));
+            for (char* c = reason; *c; c++) if (*c == '\n' || *c == '\r') *c = ' ';
+            f.printf("  task=%s reason=%s\n  elf=", sm.exc_task, reason);
+            for (int i = 0; i < 8; i++) f.printf("%02x", sm.app_elf_sha256[i]);
+            f.printf(" pc=0x%08x bt=", (unsigned)sm.exc_pc);
+            for (uint32_t i = 0; i < sm.exc_bt_info.depth && i < 16; i++) f.printf("0x%08x ", (unsigned)sm.exc_bt_info.bt[i]);
+            f.print("\n");
+            Serial.printf("[crash] task=%s pc=0x%08x %s\n", sm.exc_task, (unsigned)sm.exc_pc, reason);
+            esp_core_dump_image_erase();  // logged: don't report this one again after a normal reset
+          }
+          f.close();
+        }
+      }
     }
   }
   memLog("boot");
   openApp(appHome);
+  if (sdOK && esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT0) {  // woke from deep sleep: back to the same app
+    File f = SD.open("/waveos/resume.txt");
+    String n = f ? f.readString() : String();
+    if (f) f.close();
+    SD.remove("/waveos/resume.txt");
+    for (App* a : {appMusic, appSynth, appDrums, appIR, appNotes, appTools, appGames, appFun, appSettings, appCalc, appGraph, appResistor, appElec,
+                   appTimer, appMetro, appFlash, appMorse, appLevel, appConvert, appDecide, appMeter, appSnake, app2048, appBlocks, appBreakout,
+                   appFlappy, appTyping, appRhythm, appStarfall, appMines, appDuel, appEcho, appRunner, appMaze, appFour, appTanks, appRocks,
+                   appHopper, appSudoku, appWords, appPet, appDoodle, appTtt, appBubbles, appOracle, appFive, appCode, appLights, appSlide,
+                   appReflex, appLife})
+      if (a && n == a->name) { openApp(a); break; }
+  }
   // draw the first home frame while the backlight is off, then fade in
   cur->draw();
   cv.pushSprite(0, 0);
@@ -737,6 +838,7 @@ static void serialDev(std::vector<KeyEv>& keys) {
       else if (!strcmp(k, "TAB")) e.code = K_TAB; else if (!strcmp(k, "DEL")) e.code = K_BACK;
       else if (!strcmp(k, "UP")) { e.code = K_CHAR; e.ch = ';'; } else if (!strcmp(k, "DN")) { e.code = K_CHAR; e.ch = '.'; }
       else if (!strcmp(k, "LT")) { e.code = K_CHAR; e.ch = ','; } else if (!strcmp(k, "RT")) { e.code = K_CHAR; e.ch = '/'; }
+      else if (k[0] == '~' && k[1]) { e.code = K_CHAR; e.ch = k[1]; e.fn = true; }  // K~m = Fn+M
       else { e.code = K_CHAR; e.ch = k[0]; }
       keys.push_back(e);
     }
@@ -780,6 +882,10 @@ void loop() {
   auto keys = pollKeys();
   serialDev(keys);
   bool g0 = M5Cardputer.BtnA.wasPressed();
+  if (swallowKeys) {  // the key that woke the device does nothing
+    if (M5Cardputer.Keyboard.keyList().empty() && !M5Cardputer.BtnA.isPressed()) swallowKeys = false;
+    keys.clear(); g0 = false;
+  }
   bool anyInput = !keys.empty() || g0 || !heldKeys.empty();
   if (screenOff && !keys.empty()) {  // screen off: media keys work without waking the screen
     bool media = true;
@@ -812,13 +918,16 @@ void loop() {
       else { before = cur; openApp(appCalc); }
       continue;
     }
+    if (e.fn && e.code == K_CHAR && tolower(e.ch) == 'l') { lightSleep(); keys.clear(); break; }  // SLEEP, keeps everything
     if (e.fn && e.code == K_CHAR && tolower(e.ch) == 'b') { screenOff = true; M5Cardputer.Display.setBrightness(0); M5Cardputer.Display.sleep(); continue; }
     if (cfg.click && !cur->wantsAllKeys() && !e.rep) Audio::blip(1400, 8, Audio::W_SQUARE, 0.12f);
     bool handled = false;
     try { handled = cur->key(e); }
     catch (std::bad_alloc&) { char b[40]; snprintf(b, sizeof(b), "OUT OF MEMORY (%uK)", (unsigned)(ESP.getMaxAllocHeap() / 1024)); toast(b, 2500); memLog("oom-key"); handled = true; }
+    if (handled && cur->saveKey()) { cur->stateDirty = true; cur->stateT = millis(); }
     if (!handled && e.code == K_ESC) goBack();
   }
+  if (cur->stateDirty && millis() - cur->stateT > 1000) appStateSave(cur);  // progress survives a reboot / crash
   if (g0) goHome();
   musicTick();
   settingsAutosave();
@@ -839,7 +948,7 @@ void loop() {
 
   uint32_t idle = millis() - lastInput;
   bool busy = (Music::active() && !Music::paused()) || Looper::playing || Looper::counting || cur == appFlash;
-  if (cfg.sleepMin && !busy && idle > cfg.sleepMin * 60000UL) deepSleep();
+  if (cfg.sleepMin && !busy && idle > cfg.sleepMin * 60000UL) lightSleep();  // auto sleep: same as Fn+L
   if (!Batt::usb && Batt::pct >= 0 && Batt::mv > 2500 && Batt::mv < 3320 && millis() > 30000) deepSleep();  // protect the battery
   if (!saver && !screenOff && cfg.dimSec && idle > cfg.dimSec * 1000UL && cur != appMetro && cur != appFlash) {
     saver = true;

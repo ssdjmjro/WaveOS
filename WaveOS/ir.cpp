@@ -190,6 +190,7 @@ static std::vector<Macro> macros;
 static int runMacro = -1, runStep = 0, runRep = 0;
 static uint32_t runAt = 0;
 static void loadMacros() {
+  runMacro = -1;
   macros.clear();
   if (sdOK && !SD.exists("/ir/macros.txt")) {
     File f = SD.open("/ir/macros.txt", FILE_WRITE);
@@ -228,6 +229,7 @@ static void loadMacros() {
 }
 static void macroStep() {
   if (runMacro < 0 || millis() < runAt) return;
+  if (runMacro >= (int)macros.size()) { runMacro = -1; return; }
   Macro& m = macros[runMacro];
   if (runStep >= (int)m.steps.size()) { runMacro = -1; toast("MACRO DONE"); return; }
   String st = m.steps[runStep];
@@ -326,7 +328,43 @@ static void sendCapture(const Capture& c) {
 }
 
 // ---- Flipper-style .ir files in /ir (e.g. from the open Flipper-IRDB collection)
-struct IrSig { String name, type, proto; uint32_t addr = 0, cmd = 0, freq = 38000; uint32_t dataPos = 0; };
+// fixed size (no heap Strings per signal: 100 signals used to fragment the little RAM left while music plays)
+struct IrSig {
+  char name[24] = "", type[8] = "", proto[12] = "";
+  uint32_t addr = 0, cmd = 0, freq = 38000, dataPos = 0;
+  bool raw() const { return !strcmp(type, "raw"); }
+};
+// one line of a .ir file into buf (cut to cap). Raw "data:" lines can be 6 KB long: they are read
+// through without being stored (only where they start is remembered).
+static bool irLine(File& f, char* buf, int cap, uint32_t& start) {
+  start = f.position();
+  int n = 0; bool any = false;
+  for (;;) {
+    int c = f.read();
+    if (c < 0) break;
+    any = true;
+    if (c == '\n') break;
+    if (c != '\r' && n < cap - 1) buf[n++] = (char)c;
+  }
+  while (n && buf[n - 1] == ' ') n--;
+  buf[n] = 0;
+  return any;
+}
+// "key: value" -> key / value pointers inside buf, false if not such a line
+static bool irKV(char* buf, char*& k, char*& v) {
+  char* c = strchr(buf, ':');
+  if (!c) return false;
+  *c = 0; k = buf; v = c + 1;
+  while (*k == ' ') k++;
+  while (*v == ' ') v++;
+  return true;
+}
+static void irCopy(char* dst, int cap, const char* src, bool upper) {
+  int i = 0;
+  for (; src[i] && i < cap - 1; i++) dst[i] = upper ? toupper((unsigned char)src[i]) : src[i];
+  dst[i] = 0;
+}
+static bool irField(IrSig& cur, const char* k, const char* v, uint32_t lineStart);
 static std::vector<String> irFiles;   // entries of irDir: folders end with '/'
 static std::vector<IrSig> irSigs;
 static String irFileOpen;             // full path of the open .ir file
@@ -344,7 +382,7 @@ static void listIrDir(const String& dir) {
     if (n.startsWith(".")) continue;
     String l = n; l.toLowerCase();
     if (!isDir && !l.endsWith(".ir")) continue;
-    if (irFiles.size() >= 400) { irMore++; continue; }
+    if (irFiles.size() >= 400 || ESP.getMaxAllocHeap() < 8000) { irMore++; continue; }
     irFiles.push_back(isDir ? n + "/" : n);
   }
   d.close();
@@ -354,38 +392,43 @@ static void listIrDir(const String& dir) {
     return a.compareTo(b) < 0;   // byte order is fine for these names
   });
 }
-static uint32_t hexBytesLE(const String& v) {  // "04 00 00 00" -> 0x00000004
+static uint32_t hexBytesLE(const char* v) {  // "04 00 00 00" -> 0x00000004
   uint32_t r = 0; int sh = 0;
-  for (int i = 0; i < (int)v.length() && sh < 32;) {
-    while (i < (int)v.length() && v[i] == ' ') i++;
-    if (i + 1 >= (int)v.length() + 1) break;
-    String b = v.substring(i, i + 2);
-    if (b.length() < 2) break;
-    r |= strtoul(b.c_str(), nullptr, 16) << sh;
-    sh += 8; i += 2;
+  while (*v && sh < 32) {
+    while (*v == ' ') v++;
+    if (!isxdigit((unsigned char)v[0]) || !isxdigit((unsigned char)v[1])) break;
+    char b[3] = {v[0], v[1], 0};
+    r |= strtoul(b, nullptr, 16) << sh;
+    sh += 8; v += 2;
   }
   return r;
+}
+static bool irField(IrSig& cur, const char* k, const char* v, uint32_t lineStart) {  // true for "name" (a new signal starts)
+  if (!strcmp(k, "name")) return true;
+  if (!strcmp(k, "type")) irCopy(cur.type, sizeof(cur.type), v, false);
+  else if (!strcmp(k, "protocol")) irCopy(cur.proto, sizeof(cur.proto), v, false);
+  else if (!strcmp(k, "address")) cur.addr = hexBytesLE(v);
+  else if (!strcmp(k, "command")) cur.cmd = hexBytesLE(v);
+  else if (!strcmp(k, "frequency")) cur.freq = strtoul(v, nullptr, 10);
+  else if (!strcmp(k, "data")) cur.dataPos = lineStart;
+  return false;
 }
 static bool openIrFile(const String& path) {
   irSigs.clear();
   File f = SD.open(path);
   if (!f) return false;
+  irSigs.reserve(24);
   IrSig cur; bool have = false;
-  while (f.available() && irSigs.size() < 100) {
-    uint32_t lineStart = f.position();
-    String l = f.readStringUntil('\n'); l.trim();
-    int c = l.indexOf(':');
-    if (c < 0) continue;
-    String k = l.substring(0, c), v = l.substring(c + 1); v.trim();
-    if (k == "name") { if (have) irSigs.push_back(cur); cur = IrSig(); cur.name = v; cur.name.toUpperCase(); have = true; }
-    else if (k == "type") cur.type = v;
-    else if (k == "protocol") cur.proto = v;
-    else if (k == "address") cur.addr = hexBytesLE(v);
-    else if (k == "command") cur.cmd = hexBytesLE(v);
-    else if (k == "frequency") cur.freq = v.toInt();
-    else if (k == "data") cur.dataPos = lineStart;
+  char ln[96]; uint32_t at; char *k, *v;
+  while (irSigs.size() < 100 && irLine(f, ln, sizeof(ln), at)) {
+    if (!irKV(ln, k, v)) continue;
+    if (irField(cur, k, v, at)) {
+      if (have) irSigs.push_back(cur);
+      cur = IrSig(); irCopy(cur.name, sizeof(cur.name), v, true); have = true;
+      if (ESP.getMaxAllocHeap() < 6000) break;  // nearly out of RAM: show what we have
+    }
   }
-  if (have) irSigs.push_back(cur);
+  if (have && irSigs.size() < 100) irSigs.push_back(cur);
   f.close();
   irFileOpen = path;
   return true;
@@ -393,24 +436,30 @@ static bool openIrFile(const String& path) {
 static String sendIrSig(const IrSig& s) {
   String p = s.proto;
   uint32_t a = s.addr, c = s.cmd;
-  if (s.type == "raw") {
+  if (s.raw()) {  // timings are read straight from the file (no 6 KB String)
     File f = SD.open(irFileOpen);
     if (!f) return "";
     f.seek(s.dataPos);
-    String l = f.readStringUntil('\n');
-    f.close();
     static uint16_t buf[1024];
-    int n = 0, i = l.indexOf(':') + 1;
-    while (i > 0 && i < (int)l.length() && n < 1024) {
-      while (i < (int)l.length() && l[i] == ' ') i++;
-      long v = 0; bool any = false;
-      while (i < (int)l.length() && isdigit((unsigned char)l[i])) { v = v * 10 + (l[i++] - '0'); any = true; }
-      if (!any) break;
-      buf[n++] = (uint16_t)std::min<long>(v, 65000);
+    static uint8_t chunk[256];
+    int n = 0, got = 0, pos = 0, ch;
+    bool data = false, any = false; long v = 0;
+    for (;;) {
+      if (pos >= got) { got = f.read(chunk, sizeof(chunk)); pos = 0; if (got <= 0) break; }
+      ch = chunk[pos++];
+      if (!data) { if (ch == ':') data = true; else if (ch == '\n') break; continue; }
+      if (ch >= '0' && ch <= '9') { v = v * 10 + (ch - '0'); any = true; continue; }
+      if (any) { if (n >= 1024) break; buf[n++] = (uint16_t)std::min<long>(v, 65000); v = 0; any = false; }
+      if (ch == '\n') break;
     }
-    if (!n) return "";
-    IrSender.sendRaw(buf, n, (s.freq + 500) / 1000);
-    return "RAW " + String(n) + " @" + String(s.freq / 1000) + "K";
+    if (any && n < 1024) buf[n++] = (uint16_t)std::min<long>(v, 65000);
+    f.close();
+    if (n < 3) return "";
+    if (!(n & 1)) n--;  // must end on a mark
+    int khz = (s.freq + 500) / 1000;
+    if (khz < 15 || khz > 100) khz = 38;  // bad / missing frequency in the file
+    IrSender.sendRaw(buf, n, khz);
+    return "RAW " + String(n) + " @" + String(khz) + "K";
   }
   if (p == "NEC" || p == "Pioneer") IrSender.sendNEC(a & 0xFF, c & 0xFF, 0);
   else if (p == "NECext") IrSender.sendNECRaw((a & 0xFFFF) | ((c & 0xFFFF) << 16), 0);
@@ -473,22 +522,13 @@ static bool findPowerSig(const String& path, IrSig& out) {  // first POWER-like 
   File f = SD.open(path);
   if (!f) return false;
   IrSig cur; bool have = false, found = false;
-  while (f.available()) {
-    uint32_t lineStart = f.position();
-    String l = f.readStringUntil('\n'); l.trim();
-    int c = l.indexOf(':');
-    if (c < 0) continue;
-    String k = l.substring(0, c), v = l.substring(c + 1); v.trim();
-    if (k == "name") {
+  char ln[96]; uint32_t at; char *k, *v;
+  while (irLine(f, ln, sizeof(ln), at)) {
+    if (!irKV(ln, k, v)) continue;
+    if (irField(cur, k, v, at)) {
       if (have && isPowerName(cur.name)) { found = true; break; }
-      cur = IrSig(); cur.name = v; cur.name.toUpperCase(); have = true;
+      cur = IrSig(); irCopy(cur.name, sizeof(cur.name), v, true); have = true;
     }
-    else if (k == "type") cur.type = v;
-    else if (k == "protocol") cur.proto = v;
-    else if (k == "address") cur.addr = hexBytesLE(v);
-    else if (k == "command") cur.cmd = hexBytesLE(v);
-    else if (k == "frequency") cur.freq = v.toInt();
-    else if (k == "data") cur.dataPos = lineStart;
   }
   if (!found && have && isPowerName(cur.name)) found = true;
   f.close();
@@ -537,7 +577,7 @@ static void srchLineDone() {
     for (int i = 0; i <= srchLL; i++) low[i] = tolower((unsigned char)srchLine[i]);
     bool ok = true;
     for (int t = 0; t < srchNT && ok; t++) ok = strstr(low, srchTerms[t]) != nullptr;
-    if (ok) { srchTotal++; if (srchRes.size() < 120) srchRes.push_back(String(srchLine)); }
+    if (ok) { srchTotal++; if (srchRes.size() < 120 && ESP.getMaxAllocHeap() > 8000) srchRes.push_back(String(srchLine)); }
   }
   srchLL = 0;
 }

@@ -5,9 +5,10 @@
 #include <SD.h>
 #include <vector>
 #include <initializer_list>
+#include <type_traits>
 
 #define FW_NAME "WAVE OS"
-#define FW_VER  "1.24"
+#define FW_VER  "1.25"
 
 // ---------------------------------------------------------------- theme
 struct Theme {
@@ -53,7 +54,7 @@ enum IconId { IC_MUSIC, IC_SYNTH, IC_MIDI, IC_IR, IC_TOOLS, IC_NOTES, IC_GAMES, 
               IC_BREAKOUT, IC_FLAPPY, IC_TYPING, IC_RHYTHM, IC_DRUMS, IC_STARFALL, IC_MINES,
               IC_DUEL, IC_ECHO, IC_RUNNER, IC_MAZE, IC_FOUR, IC_TANKS, IC_ROCKS, IC_HOPPER, IC_TIMER, IC_FUN, IC_SUDOKU, IC_WORDS, IC_PET, IC_DOODLE,
               IC_TTT, IC_BUBBLES, IC_ORACLE, IC_WIFI, IC_FLASH, IC_MORSE,
-              IC_LIGHTS, IC_SLIDE, IC_REFLEX, IC_CODE, IC_FIVE, IC_LIFE, IC_METRO, IC_LEVEL, IC_CONV, IC_DECIDE, IC_COUNT };
+              IC_LIGHTS, IC_SLIDE, IC_REFLEX, IC_CODE, IC_FIVE, IC_LIFE, IC_METRO, IC_LEVEL, IC_CONV, IC_DECIDE, IC_METER, IC_COUNT };
 
 // ---------------------------------------------------------------- input
 enum KeyCode : uint8_t { K_NONE, K_CHAR, K_UP, K_DOWN, K_LEFT, K_RIGHT, K_ENTER, K_BACK, K_ESC, K_TAB };
@@ -70,10 +71,35 @@ std::vector<KeyEv> pollKeys();
 extern std::vector<char> heldKeys;  // un-shifted values of held non-modifier keys
 extern bool heldFn, heldShift;
 
+// ---------------------------------------------------------------- saved app state (survives reboots)
+// An app lists its fields in persist(); the same function saves and loads them:
+//   void persist(Persist& p) override { p.io(grid); p.io(score); }
+// The file is /waveos/save/<saveKey>.sav (hex + checksum). A size mismatch (e.g. after a firmware
+// change) just ignores the old file.
+struct Persist {
+  std::vector<uint8_t> buf;
+  size_t rd = 0;
+  bool loading = false;
+  template <class T> void io(T& v) {
+    static_assert(std::is_trivially_copyable<T>::value, "plain data only");
+    if (!loading) { const uint8_t* p = (const uint8_t*)&v; buf.insert(buf.end(), p, p + sizeof(T)); }
+    else if (rd + sizeof(T) <= buf.size()) { memcpy((void*)&v, buf.data() + rd, sizeof(T)); rd += sizeof(T); }
+  }
+  // elapsed-time helper: stores (now - t0) and moves t0 on load so a running clock continues
+  void clock(uint32_t& t0, uint32_t now) { uint32_t el = now - t0; io(el); if (loading) t0 = now - el; }
+};
+bool stateRead(const char* key, std::vector<uint8_t>& out);
+void stateWrite(const char* key, const std::vector<uint8_t>& data);
+
 // ---------------------------------------------------------------- apps
 struct App {
   const char* name = "";
   App* parent = nullptr;
+  // saved state: apps that return a key are saved ~1 s after a handled key, on leave and before sleep
+  virtual const char* saveKey() { return nullptr; }
+  virtual void persist(Persist&) {}
+  bool stateTried = false, stateDirty = false;
+  uint32_t stateT = 0;
   virtual void enter() {}
   virtual void leave() {}
   virtual bool key(const KeyEv&) { return false; }  // true = handled
@@ -84,6 +110,8 @@ struct App {
   virtual ~App() {}
 };
 void openApp(App* a);
+void appStateSave(App* a);   // write a's state now (in the background) if it has one
+void appStateLoad(App* a);   // once, before the first enter()
 void goBack();
 void goHome();
 extern App *appHome, *appMusic, *appSynth, *appIR, *appTools, *appNotes, *appGames,
@@ -94,7 +122,7 @@ extern App *appHome, *appMusic, *appSynth, *appIR, *appTools, *appNotes, *appGam
            *appFun, *appSudoku, *appWords, *appPet, *appDoodle, *appTtt, *appBubbles, *appOracle,
            *appWifi, *appFlash, *appMorse,
            *appLights, *appSlide, *appReflex, *appCode, *appFive, *appLife,
-           *appLevel, *appConvert, *appDecide;
+           *appLevel, *appConvert, *appDecide, *appMeter;
 
 // ---------------------------------------------------------------- settings
 struct Settings {

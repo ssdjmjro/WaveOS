@@ -42,6 +42,61 @@ void sdWriteAsync(const char* path, String* data) {
 }
 bool sdWriteBusy() { return sdJobRun; }
 
+// ---- saved app state: "WSAV <bytes> <checksum>\n" + hex. Written in the background like scores.
+static uint32_t stateSum(const uint8_t* d, size_t n) { uint32_t h = 2166136261u; for (size_t i = 0; i < n; i++) h = (h ^ d[i]) * 16777619u; return h; }
+void stateWrite(const char* key, const std::vector<uint8_t>& d) {
+  if (!sdOK || !key) return;
+  static bool dirMade = false;
+  if (!dirMade) { ensureDir("/waveos/save"); dirMade = true; }
+  String* s = new String();
+  s->reserve(d.size() * 2 + 40);
+  char h[40];
+  snprintf(h, sizeof(h), "WSAV %u %08x\n", (unsigned)d.size(), (unsigned)stateSum(d.data(), d.size()));
+  *s += h;
+  static const char* hx = "0123456789abcdef";
+  for (size_t i = 0; i < d.size(); i++) { *s += hx[d[i] >> 4]; *s += hx[d[i] & 15]; if (i % 48 == 47) *s += '\n'; }
+  *s += '\n';
+  char p[48]; snprintf(p, sizeof(p), "/waveos/save/%s.sav", key);
+  sdWriteAsync(p, s);
+}
+bool stateRead(const char* key, std::vector<uint8_t>& out) {
+  out.clear();
+  if (!sdOK || !key) return false;
+  char p[48]; snprintf(p, sizeof(p), "/waveos/save/%s.sav", key);
+  File f = SD.open(p);
+  if (!f) return false;
+  String hd = f.readStringUntil('\n');
+  unsigned n = 0, sum = 0;
+  if (sscanf(hd.c_str(), "WSAV %u %x", &n, &sum) != 2 || n > 8192) { f.close(); return false; }
+  out.reserve(n);
+  int hi = -1;
+  while (f.available() && out.size() < n) {
+    int c = f.read(), v = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1;
+    if (v < 0) continue;
+    if (hi < 0) hi = v; else { out.push_back((uint8_t)(hi << 4 | v)); hi = -1; }
+  }
+  f.close();
+  if (out.size() != n || stateSum(out.data(), n) != sum) { out.clear(); return false; }  // cut off / damaged
+  return true;
+}
+void appStateSave(App* a) {
+  if (!a || !a->saveKey()) return;
+  Persist p;
+  a->persist(p);
+  stateWrite(a->saveKey(), p.buf);
+  a->stateDirty = false;
+}
+void appStateLoad(App* a) {
+  if (!a || a->stateTried || !a->saveKey()) return;
+  a->stateTried = true;
+  Persist probe;
+  a->persist(probe);                 // how many bytes this firmware's layout needs
+  Persist p; p.loading = true;
+  if (!stateRead(a->saveKey(), p.buf) || p.buf.size() != probe.buf.size()) return;
+  a->persist(p);
+  Serial.printf("[state] %s restored (%u B)\n", a->saveKey(), (unsigned)p.buf.size());
+}
+
 // ---- new best: a short fanfare + toast, played from loop() so it doesn't clash with the game over sound
 static uint32_t fanfareT = 0;
 void scoreTick() {
@@ -218,6 +273,11 @@ struct G2048App : App {
   int popX = -1, popY = -1, gain = 0;
   static constexpr uint32_t SLIDE_MS = 90;
   G2048App() { name = "MERGE"; }
+  const char* saveKey() override { return "merge"; }
+  void persist(Persist& p) override {
+    p.io(g); p.io(score); p.io(over); p.io(won); p.io(keepGoing);
+    if (p.loading) { canUndo = false; nmv = 0; animT = 0; popX = popY = -1; memset(merged, 0, sizeof(merged)); }
+  }
   void enter() override { best = saved = loadScore("2048"); if (!score && !over) reset(); }
   void leave() override { saveBest(); }
   void saveBest() { if (best > saved) { saved = best; saveScore("2048", best); } }

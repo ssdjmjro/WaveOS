@@ -30,7 +30,10 @@ struct LightsApp : App {
     if (!any) flip(2, 2);
     moves = 0; won = false;
   }
-  void enter() override { best = loadScore("lights"); static bool once = false; if (!once || won) { once = true; gen(); } }
+  bool once = false;
+  const char* saveKey() override { return "lights"; }
+  void persist(Persist& p) override { p.io(g); p.io(cx); p.io(cy); p.io(moves); p.io(level); p.io(won); p.io(once); }
+  void enter() override { best = loadScore("lights"); if (!once || won) { once = true; gen(); } }
   bool key(const KeyEv& e) override {
     if (won) { if (e.code == K_ENTER || (e.code == K_CHAR && e.ch == ' ')) { level++; gen(); return true; } return e.code != K_ESC; }
     KeyCode k = e.nav();
@@ -96,7 +99,13 @@ struct SlideApp : App {
     }
     moves = 0; won = false; started = false;
   }
-  void enter() override { best = loadScore("slide"); static bool once = false; if (!once || won) { once = true; shuffle(); } }
+  bool once = false;
+  const char* saveKey() override { return "slide"; }
+  void persist(Persist& p) override {
+    p.io(t); p.io(blank); p.io(moves); p.io(won); p.io(started); p.io(once);
+    uint32_t now = millis(); p.clock(t0, won && !p.loading ? tEnd : now); if (p.loading && won) tEnd = now;
+  }
+  void enter() override { best = loadScore("slide"); if (!once || won) { once = true; shuffle(); } }
   bool solved() { for (int i = 0; i < 15; i++) if (t[i] != i + 1) return false; return true; }
   bool key(const KeyEv& e) override {
     if (won) { if (e.code == K_ENTER || (e.code == K_CHAR && e.ch == ' ')) { shuffle(); return true; } return e.code != K_ESC; }
@@ -213,7 +222,10 @@ struct CodeApp : App {
     return v ? P[v] : T.bg2;
   }
   void reset() { for (auto& s : secret) s = random(1, 7); memset(guess, 0, sizeof(guess)); row = col = 0; state = 0; }
-  void enter() override { wins = loadScore("code"); static bool once = false; if (!once || state) { once = true; reset(); } }
+  bool once = false;
+  const char* saveKey() override { return "code"; }
+  void persist(Persist& p) override { p.io(secret); p.io(guess); p.io(blackP); p.io(whiteP); p.io(row); p.io(col); p.io(state); p.io(once); }
+  void enter() override { wins = loadScore("code"); if (!once || state) { once = true; reset(); } }
   void score() {
     int b = 0, w = 0, cs[7] = {0}, cg[7] = {0};
     for (int i = 0; i < 4; i++) { if (guess[row][i] == secret[i]) b++; else { cs[secret[i]]++; cg[guess[row][i]]++; } }
@@ -304,6 +316,8 @@ struct FiveApp : App {
     memset(rows, 0, sizeof(rows)); memset(marks, 0, sizeof(marks)); memset(keyMark, 0, sizeof(keyMark));
     row = len = 0; state = 0;
   }
+  const char* saveKey() override { return "five"; }
+  void persist(Persist& p) override { p.io(word); p.io(rows); p.io(marks); p.io(keyMark); p.io(row); p.io(len); p.io(state); if (p.loading) word[5] = 0; }
   void enter() override { streak = loadScore("five"); if (!word[0] || state) next(); }
   void judge() {
     char* g = rows[row];

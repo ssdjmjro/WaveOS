@@ -279,8 +279,10 @@ uint16_t art[28 * 28];
 struct Lyr { float t; String s; };
 std::vector<Lyr> lyrics;
 
+static bool cleanLost = false;  // the last clean() call dropped non-English characters
 static String clean(const uint8_t* p, int n, int enc) {
   String s;
+  cleanLost = false;
   if (enc == 1 || enc == 2) {  // UTF-16: keep ASCII
     int i = 0;
     bool be = enc == 2;
@@ -288,12 +290,12 @@ static String clean(const uint8_t* p, int n, int enc) {
     for (; i + 1 < n; i += 2) {
       uint16_t c = be ? (p[i] << 8 | p[i + 1]) : (p[i] | p[i + 1] << 8);
       if (!c) break;
-      s += (c >= 32 && c < 127) ? (char)c : '?';
+      if (c >= 32 && c < 127) s += (char)c; else cleanLost = true;
     }
   } else {
     for (int i = 0; i < n && p[i]; i++) {
       if (p[i] >= 32 && p[i] < 127) s += (char)p[i];
-      else if (p[i] >= 0xC0) s += '?';  // utf-8 lead byte (continuations skipped)
+      else cleanLost = true;  // utf-8 / latin-1 letters: the font only has English ones
     }
   }
   s.trim();
@@ -377,7 +379,7 @@ static void readID3(const String& path) {
       uint8_t b[256];
       f.read(b, fs);
       String s = clean(b + 1, fs - 1, b[0]);
-      if (isT) title = s; else if (isA) artist = s; else album = s;
+      if (!cleanLost && s.length()) { if (isT) title = s; else if (isA) artist = s; else album = s; }
     } else if (wantArt && (!strcmp(id, "APIC") || !strcmp(id, "PIC")) && !hasArt && fs < 24000 && fs + 30000 < ESP.getMaxAllocHeap() && ESP.getFreeHeap() > 60000) {
       uint8_t* b = (uint8_t*)malloc(fs);
       if (b) {
@@ -418,14 +420,20 @@ static void loadLyrics(const String& path) {
   std::sort(lyrics.begin(), lyrics.end(), [](const Lyr& a, const Lyr& b) { return a.t < b.t; });
 }
 // fast part: title / artist only, so the new song shows up immediately
+static String ascii(const String& in) {  // names on screen: English letters only
+  String o; o.reserve(in.length());
+  for (unsigned i = 0; i < in.length(); i++) { uint8_t c = in[i]; if (c >= 32 && c < 127) o += (char)c; }
+  o.trim();
+  return o.length() ? o : String("?");
+}
 void load(const String& path) {
-  title = baseName(path); artist = parentName(path); album = "";
+  title = ascii(baseName(path)); artist = ascii(parentName(path)); album = "";
   hasArt = false;
   lyrics.clear();
   String l = path; l.toLowerCase();
   wantArt = false;
   if (l.endsWith(".mp3") || l.endsWith(".aac")) readID3(path);
-  if (!title.length()) title = baseName(path);
+  if (!title.length()) title = ascii(baseName(path));
   pending = path;
 }
 // slow part (album art + lyrics), run a moment later from musicTick()
@@ -589,6 +597,11 @@ void searchSongs(const String& q, std::vector<int>& out, int max) {
 String songPath(int idx) { return idx >= 0 && idx < (int)Lib::files.size() ? Lib::files[idx] : String(); }
 void playSong(int idx) { libEnsureScanned(); Ctl::play(idx); openApp(appMusic); }
 
+void musicSaveNow() {  // before sleeping
+  if (!Lib::scanned || Ctl::cur < 0) return;
+  Ctl::rememberBookmark(); Ctl::saveState();
+  if (Stats::dirty) { Stats::dirty = false; Stats::save(); }
+}
 static uint32_t shakeT = 0;
 static int shakeN = 0;
 void musicTick() {
@@ -647,7 +660,12 @@ struct MusicApp : App {
     for (int i = 0; i < nx && i < ny; i++) { int d = toupper((unsigned char)x[i]) - toupper((unsigned char)y[i]); if (d) return d; }
     return nx - ny;
   }
-  static String segStr(int i, int which) { const char* s; int n; seg(i, which, s, n); String r; r.reserve(n); for (int k = 0; k < n; k++) r += s[k]; return r; }
+  static String segStr(int i, int which) {
+    const char* s; int n; seg(i, which, s, n);
+    String r; r.reserve(n);
+    for (int k = 0; k < n; k++) if ((uint8_t)s[k] >= 32 && (uint8_t)s[k] < 127) r += s[k];  // the font has English letters only
+    return r.length() || !n ? r : String("?");
+  }
   String rowLabel(const Row& r) {
     switch (r.type) {
       case R_SONG: return segStr(r.idx, 0);
@@ -785,6 +803,20 @@ struct MusicApp : App {
       for (int i = 0; i < (int)rows.size(); i++) if (rows[i].type == R_SONG && rows[i].idx == Ctl::cur) { sel = i; break; }
   }
   void openCtx(const std::vector<int>& v, const String& nm, int from) { ctx = v; ctxName = nm; ctxFrom = from; view = V_CTX; sel = 0; top = 0; build(); }
+  // Fn+R: song numbers change after a rescan, so everything that holds one is mapped by path
+  // (before, the playing song / queue pointed at wrong or missing entries -> crash)
+  void rescan() {
+    String curP = Ctl::cur >= 0 ? Lib::files[Ctl::cur] : String();
+    std::vector<String> q; for (int i : Ctl::queue) q.push_back(Lib::files[i]);
+    Lib::scan();
+    Ctl::cur = curP.length() ? Lib::find(curP) : -1;
+    Ctl::queue.clear(); for (auto& p : q) { int i = Lib::find(p); if (i >= 0) Ctl::queue.push_back(i); }
+    if (Ctl::cur < 0 && Music::active()) Music::close();
+    ctx.clear(); folderCache.clear(); plCache.clear();
+    Ctl::setSource({}, "ALL SONGS");
+    setView(view == V_CTX ? V_SONGS : view);
+    char b[32]; snprintf(b, sizeof(b), "RESCANNED: %d SONGS", (int)Lib::files.size()); toast(b);
+  }
   void enter() override {
     enterT = millis();
     libEnsureScanned();
@@ -829,7 +861,7 @@ struct MusicApp : App {
       return true;
     }
     if (e.code == K_CHAR && e.ch == ' ') { if (Music::active()) Music::pause(!Music::paused()); return true; }
-    if (e.code == K_CHAR && e.fn && tolower(e.ch) == 'r') { Lib::scan(); Ctl::setSource({}, "ALL SONGS"); build(); toast("LIBRARY RESCANNED"); return true; }
+    if (e.code == K_CHAR && e.fn && tolower(e.ch) == 'r') { rescan(); return true; }
     if (e.code == K_CHAR && e.ch == '\\' && view == V_SONGS) { sortMode = (sortMode + 1) % 4; build(); sel = 0; top = 0; skipHeader(1); toast((String("SORT: ") + SORTN[sortMode]).c_str(), 800); return true; }
     if (e.code == K_CHAR && (e.ch == '-' || e.ch == '=')) { volumeChange(e.ch == '=' ? 1 : -1); return true; }
     int s = n && rows[sel].type == R_SONG ? rows[sel].idx : -1;

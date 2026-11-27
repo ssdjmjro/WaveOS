@@ -673,13 +673,27 @@ static AudioGenerator* gen = nullptr;
 static void* mp3Arena = nullptr;  // MP3 decoder memory, reserved once at boot (avoids out-of-memory later)
 String lastErr;
 
+// The decoder runs on core 0 next to the idle task. A file the decoder can't make sense of (or a big
+// FLAC fast-forward) could keep it busy for seconds inside one loop() call: the task watchdog then
+// reset the device. Both paths now give the CPU away every few KB / samples.
+class YieldingSD : public AudioFileSourceSD {
+ public:
+  using AudioFileSourceSD::AudioFileSourceSD;
+  uint32_t got = 0;
+  uint32_t read(void* d, uint32_t len) override {
+    uint32_t r = AudioFileSourceSD::read(d, len);
+    if ((got += r) >= 16384) { got = 0; vTaskDelay(1); }
+    return r;
+  }
+};
+static uint32_t skipN = 0;
 class RingOut : public AudioOutput {
  public:
   bool begin() override { return true; }
   bool SetRate(int hz) override { hertz = hz; codecRate = hz; return true; }
   bool SetChannels(int c) override { channels = c; return true; }
   bool ConsumeSample(int16_t s[2]) override {
-    if (skipSamples) { skipSamples--; return true; }
+    if (skipSamples) { skipSamples--; if ((++skipN & 2047) == 0) vTaskDelay(1); return true; }
     if (rHead - rTail >= RING - 1) return false;
     ring[rHead & (RING - 1)] = (int16_t)(((int32_t)s[0] + s[1]) / 2);
     rHead = rHead + 1;
@@ -696,7 +710,7 @@ static void freeCodec() {
 }
 static bool startCodec(uint32_t byteOff, uint32_t skip) {
   freeCodec();
-  src = new AudioFileSourceSD(curPath.c_str());
+  src = new YieldingSD(curPath.c_str());
   if (!src->isOpen()) { freeCodec(); lastErr = "FILE WON'T OPEN"; return false; }
   // jump straight past the ID3 tag (the library's ID3 reader walks it 1 byte at a time:
   // with big embedded cover art that took seconds between songs)

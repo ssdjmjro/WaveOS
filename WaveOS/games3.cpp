@@ -186,6 +186,12 @@ struct MinesApp : App {
     first = true; over = won = false; boomX = boomY = -1;
     best = loadScore(key3());
   }
+  const char* saveKey() override { return "mines"; }
+  void persist(Persist& p) override {
+    p.io(mine); p.io(open_); p.io(flag); p.io(cx); p.io(cy); p.io(level); p.io(first); p.io(over); p.io(won); p.io(boomX); p.io(boomY);
+    uint32_t now = millis(); p.clock(t0, (over || won) && !p.loading ? tEnd : now);
+    if (p.loading) { level = constrain(level, 0, 2); if (over || won) tEnd = now; best = loadScore(key3()); }
+  }
   void enter() override { if (over || won || first) reset(); }
   bool in(int x, int y) const { return x >= 0 && y >= 0 && x < GW && y < GH; }
   int around(int x, int y) const {
