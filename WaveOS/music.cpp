@@ -467,6 +467,16 @@ int lyricIdx(float t) {
 }  // namespace Meta
 
 // ===================================================================== controller (runs in background)
+// /waveos/skips.txt: every song change the user did not ask for (shake, a song cut short, ...), to find
+// "it jumped to another song" problems. Kept under 6 KB.
+static void skipLog(const char* why) {
+  if (!sdOK) return;
+  File f = SD.open("/waveos/skips.txt", FILE_APPEND);
+  if (!f) return;
+  if (f.size() > 6000) { f.close(); SD.remove("/waveos/skips.txt"); f = SD.open("/waveos/skips.txt", FILE_WRITE); if (!f) return; }
+  f.printf("%lus %s\n", (unsigned long)(millis() / 1000), why);
+  f.close();
+}
 namespace Ctl {
 int cur = -1;
 std::vector<int> source;  // what we are playing from (all songs, a folder, a playlist...)
@@ -497,7 +507,36 @@ void buildOrder() {
   orderPos = 0;
   for (int i = 0; i < (int)order.size(); i++) if (order[i] == cur) orderPos = i;
 }
-void setSource(const std::vector<int>& s, const char* name) { source = s; sourceName = name; buildOrder(); }
+// the list being played (a folder, playlist, favourites...) survives a reboot: shuffle used to fall back to
+// ALL SONGS after a restart. Saved as path hashes, so a rescan doesn't break it.
+void saveSource() {
+  if (!sdOK) return;
+  String* d = new String(sourceName + "\n");
+  d->reserve(source.size() * 9 + 40);
+  for (int i : source) if (i >= 0 && i < (int)Lib::files.size()) { char b[10]; snprintf(b, sizeof(b), "%08x\n", (unsigned)Lib::files.h(i)); *d += b; }
+  sdWriteAsync("/waveos/source.txt", d);
+}
+void loadSource() {
+  File f = SD.open("/waveos/source.txt");
+  if (!f) return;
+  String nm = f.readStringUntil('\n'); nm.trim();
+  std::vector<uint32_t> hs;
+  while (f.available()) { String l = f.readStringUntil('\n'); l.trim(); if (l.length() == 8) hs.push_back(strtoul(l.c_str(), nullptr, 16)); }
+  f.close();
+  if (hs.empty()) return;
+  std::vector<std::pair<uint32_t, int>> idx;  // sorted hash -> song, so this stays fast for big libraries
+  idx.reserve(Lib::files.size());
+  for (int i = 0; i < (int)Lib::files.size(); i++) idx.push_back({Lib::files.h(i), i});
+  std::sort(idx.begin(), idx.end());
+  std::vector<int> v;
+  for (uint32_t h : hs) {
+    auto it = std::lower_bound(idx.begin(), idx.end(), std::make_pair(h, -1));
+    if (it != idx.end() && it->first == h) v.push_back(it->second);
+  }
+  if (v.empty()) return;
+  source = v; sourceName = nm;
+}
+void setSource(const std::vector<int>& s, const char* name) { source = s; sourceName = name; buildOrder(); saveSource(); }
 void saveState() {
   if (!sdOK || cur < 0) return;
   File f = SD.open("/waveos/music.txt", FILE_WRITE);
@@ -535,6 +574,12 @@ void next(bool user) {
   if (p >= (int)order.size()) {
     if (!user && repeat == 0) { Music::pause(true); return; }
     p = 0;
+    if (shuffle && order.size() > 2) {  // new round: a fresh order, and not the song that just played
+      int last = cur;
+      buildOrder();
+      if (order[0] == last) std::swap(order[0], order[1 + random(order.size() - 1)]);
+      orderPos = 0; p = 0;
+    }
   }
   for (int tries = 0; tries < 5; tries++, p = (p + 1) % order.size())
     if (play(order[p], 0)) return;
@@ -557,6 +602,8 @@ void loadState() {
   int i = Lib::find(path);
   if (i >= 0) {
     cur = i;
+    loadSource();
+    if (!source.empty() && std::find(source.begin(), source.end(), i) == source.end()) { source.clear(); sourceName = "ALL SONGS"; }
     buildOrder();
     if (play(i, pos)) Music::pause(true);  // ready to resume
   }
@@ -595,7 +642,13 @@ void searchSongs(const String& q, std::vector<int>& out, int max) {
   }
 }
 String songPath(int idx) { return idx >= 0 && idx < (int)Lib::files.size() ? Lib::files[idx] : String(); }
-void playSong(int idx) { libEnsureScanned(); Ctl::play(idx); openApp(appMusic); }
+int songIndex(const String& path) { libEnsureScanned(); return Lib::find(path); }
+String nowPlayingPath() { return Ctl::cur >= 0 && Ctl::cur < (int)Lib::files.size() ? Lib::files[Ctl::cur] : String(); }
+void playSong(int idx) {  // from search / home: the list becomes ALL SONGS if the song isn't in it
+  libEnsureScanned();
+  if (!Ctl::source.empty() && std::find(Ctl::source.begin(), Ctl::source.end(), idx) == Ctl::source.end()) { Ctl::cur = idx; Ctl::setSource({}, "ALL SONGS"); }
+  Ctl::play(idx); openApp(appMusic);
+}
 
 void musicSaveNow() {  // before sleeping
   if (!Lib::scanned || Ctl::cur < 0) return;
@@ -604,8 +657,21 @@ void musicSaveNow() {  // before sleeping
 }
 static uint32_t shakeT = 0;
 static int shakeN = 0;
+static int retryCur = -1; static uint32_t retryT = 0;
 void musicTick() {
-  if (Music::takeEnded()) Ctl::next(false);
+  if (Music::takeEnded()) {
+    // a song that stops well before its end is a read error (a loose SD card while walking, a damaged
+    // file): carry on from the same spot once instead of jumping to another song
+    float p = Music::pos(), l = Music::len();
+    char b[120];
+    String nm = Ctl::cur >= 0 ? baseName(Lib::files[Ctl::cur]) : String("?");
+    if (l > 10 && p < l - 4 && !(retryCur == Ctl::cur && millis() - retryT < 20000)) {
+      snprintf(b, sizeof(b), "STOPPED EARLY %d/%ds, RESUMED: %s", (int)p, (int)l, nm.c_str()); skipLog(b);
+      retryCur = Ctl::cur; retryT = millis();
+      if (Ctl::play(Ctl::cur, p)) return;
+    } else if (l > 10 && p < l - 4) { snprintf(b, sizeof(b), "STOPPED EARLY AGAIN %d/%ds, SKIPPED: %s", (int)p, (int)l, nm.c_str()); skipLog(b); }
+    Ctl::next(false);
+  }
   static uint32_t metaT = 0;
   if (Meta::pending.length()) { if (!metaT) metaT = millis(); else if (millis() - metaT > 150) { metaT = 0; Meta::finish(); } }
   if (Stats::dirty && millis() - Stats::dirtyT > 20000) { Stats::dirty = false; Stats::save(); }
@@ -626,13 +692,23 @@ void musicTick() {
   static uint32_t imuT = 0;
   bool imuNow = millis() - imuT > 80;
   if (imuNow) imuT = millis();
-  if (cfg.shake && playing && imuNow && imuAccel(ax, ay, az)) {
+  // Walking used to trigger it (two 2.3 g bumps = two steps). Now it needs a real shake: 4 hard jolts
+  // (> 2.8 g) within 1.2 s, and never with the screen off (in a pocket) or the keys locked (Fn+C).
+  extern bool screenIsOff();
+  if (cfg.shake && playing && imuNow && !keysLocked && !screenIsOff() && imuAccel(ax, ay, az)) {
     float g = sqrtf(ax * ax + ay * ay + az * az);
-    if (g > 2.3f) {
-      if (millis() - shakeT < 600) shakeN++; else shakeN = 1;
-      shakeT = millis();
-      if (shakeN >= 2 && !Lib::files.empty()) { shakeN = -10; Ctl::play(random(Lib::files.size()), 0); toast("SHAKE! RANDOM SONG"); }
-    }
+    static bool high = false;
+    if (g > 2.8f && !high) {
+      high = true;
+      if (millis() - shakeT < 1200) shakeN++; else { shakeN = 1; shakeT = millis(); }
+      if (shakeN >= 4 && !Ctl::order.empty()) {
+        shakeN = 0; shakeT = 0;
+        int pick = Ctl::order[random(Ctl::order.size())];  // from what you are listening to, not the whole card
+        if (pick == Ctl::cur && Ctl::order.size() > 1) pick = Ctl::order[(Ctl::orderPos + 1) % Ctl::order.size()];
+        skipLog("SHAKE");
+        Ctl::play(pick, 0); toast("SHAKE! RANDOM SONG");
+      }
+    } else if (g < 1.6f) high = false;
   }
 }
 
@@ -1200,7 +1276,7 @@ struct MusicApp : App {
     if (help)
       helpOverlay("MUSIC KEYS", {"SPC  PLAY/PAUSE", "< >  PREV/NEXT", "- = ^v  VOLUME", "X  RANDOM SONG", "[ ]  SEEK 10S", "S  SHUFFLE", "R  REPEAT", "E  EQ PRESET",
                                  "V  VISUAL/BIG", "L  LYRICS", "A  A-B REPEAT", "SHIFT< >  SPEED", "Z  SLEEP TIMER", "F  FAVOURITE", "I  STATS",
-                                 "TAB  LIBRARY", "+ >  QUEUE/NEXT", "*  FAV (LIST)", "&  ADD TO MIX", "SHAKE  RANDOM"});
+                                 "TAB  LIBRARY", "+ >  QUEUE/NEXT", "*  FAV (LIST)", "&  ADD TO MIX", "SHAKE 4X  RANDOM"});
   }
 };
 

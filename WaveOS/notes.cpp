@@ -11,6 +11,24 @@ struct NotesApp : App {
   String path, buf, nameIn;
   int cur = 0, scroll = 0;
   bool modified = false;
+  String undoBuf; int undoCur = -1; bool deleting = false;  // Fn+Z: undo the last run of deletes
+  // insert in place: the old "substring + char + substring" copied the whole note 3 times per key,
+  // which could run out of memory (crash) on long notes while music was playing
+  bool ins(const char* t, int n) {
+    unsigned L = buf.length();
+    if (!buf.reserve(L + n)) { toast("NOTE TOO BIG FOR MEMORY"); return false; }
+    for (int i = 0; i < n; i++) buf += ' ';
+    char* p = (char*)buf.c_str();
+    memmove(p + cur + n, p + cur, L - cur);
+    memcpy(p + cur, t, n);
+    cur += n; modified = true; deleting = false;
+    return true;
+  }
+  void beforeDelete() {  // snapshot once at the start of a run of deletes
+    if (deleting) return;
+    deleting = true;
+    undoBuf = buf; undoCur = cur;
+  }
   static constexpr int COLS = 37, ROWS = 11;
   struct VL { int start, len; };
   std::vector<VL> lines;
@@ -49,6 +67,7 @@ struct NotesApp : App {
     if (f) { buf.reserve(f.size() + 64); while (f.available() && buf.length() < 16000) buf += (char)f.read(); f.close(); }
     buf.replace("\r", "");
     cur = buf.length(); scroll = 0; modified = false;
+    undoBuf = ""; undoCur = -1; deleting = false;
     mode = EDIT;
   }
   void save() {
@@ -128,6 +147,11 @@ struct NotesApp : App {
     int ln = curLine();
     if (e.code == K_ESC) { save(); mode = LIST; scan(); return true; }
     if (e.fn && e.code == K_CHAR && tolower(e.ch) == 's') { modified = true; save(); return true; }
+    if (e.fn && e.code == K_CHAR && tolower(e.ch) == 'z') {
+      if (undoCur < 0) { toast("NOTHING TO UNDO", 700); return true; }
+      std::swap(buf, undoBuf); std::swap(cur, undoCur); cur = std::min(cur, (int)buf.length());
+      modified = true; deleting = false; toast("UNDO (FN+Z AGAIN = REDO)", 900); return true;
+    }
     if (k == K_LEFT) { cur = std::max(0, cur - 1); return true; }
     if (k == K_RIGHT) { cur = std::min((int)buf.length(), cur + 1); return true; }
     if (k == K_UP || k == K_DOWN) {
@@ -142,17 +166,14 @@ struct NotesApp : App {
       return true;
     }
     if (e.code == K_BACK) {
-      if (e.fn) { if (cur < (int)buf.length()) { buf.remove(cur, 1); modified = true; } }
-      else if (cur > 0) { buf.remove(cur - 1, 1); cur--; modified = true; }
+      if (e.fn) { if (cur < (int)buf.length()) { beforeDelete(); buf.remove(cur, 1); modified = true; } }
+      else if (cur > 0) { beforeDelete(); buf.remove(cur - 1, 1); cur--; modified = true; }
       return true;
     }
-    if (e.code == K_ENTER) { buf = buf.substring(0, cur) + "\n" + buf.substring(cur); cur++; modified = true; return true; }
-    if (e.code == K_TAB) { buf = buf.substring(0, cur) + "  " + buf.substring(cur); cur += 2; modified = true; return true; }
-    if (e.code == K_CHAR && !e.fn && buf.length() < 16000) {
-      buf = buf.substring(0, cur) + e.ch + buf.substring(cur);
-      cur++; modified = true;
-      return true;
-    }
+    if (k != K_NONE) deleting = false;
+    if (e.code == K_ENTER) { ins("\n", 1); return true; }
+    if (e.code == K_TAB) { ins("  ", 2); return true; }
+    if (e.code == K_CHAR && !e.fn && buf.length() < 16000) { ins(&e.ch, 1); return true; }
     return true;
   }
 
@@ -217,7 +238,7 @@ struct NotesApp : App {
     }
     char b[24];
     snprintf(b, sizeof(b), "%d WORDS", words());
-    hintBar({{"FN+S", "SAVE"}, {"FN", "+ARROWS"}, {"ESC", "CLOSE"}, {"", b}});
+    hintBar({{"FN+S", "SAVE"}, {"FN+Z", "UNDO"}, {"ESC", "CLOSE"}, {"", b}});
   }
   void draw() override { if (mode == EDIT) drawEdit(); else drawList(); }
 };

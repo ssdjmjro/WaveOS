@@ -119,6 +119,7 @@ void memLog(const char* where) {
                 (unsigned)ESP.getMinFreeHeap(), cur ? cur->name : "-");
   if (!sdOK) return;
   File f = SD.open("/waveos/mem.txt", FILE_APPEND);
+  if (f && f.size() > 16000) { f.close(); SD.remove("/waveos/mem.txt"); f = SD.open("/waveos/mem.txt", FILE_WRITE); }  // don't grow forever
   if (f) { f.printf("%s v%s free=%u maxblock=%u minfree=%u\n", where, FW_VER, (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap(), (unsigned)ESP.getMinFreeHeap()); f.close(); }
 }
 
@@ -171,7 +172,7 @@ struct HomeApp : App {
       case 1: return Looper::playing ? "LOOPER RUNNING" : "ARP CHORDS LOOPER";
       case 2: return Drums::playing ? "BEAT RUNNING" : "16 STEP DRUM MACHINE";
       case 3: return "TV  LEARN  RECEIVE  .IR";
-      case 4: return "CALC METER DECIDE";
+      case 4: return "CALC METER FILES";
       case 5: return "MARKDOWN ON SD";
       case 6: return "17 GAMES";
       case 7: return "13 QUIET GAMES + TOYS";
@@ -189,7 +190,7 @@ struct HomeApp : App {
                               {"MAZE", "z"}, {"FOUR", "4"}, {"TANKS", "k"}, {"ROCKS", "q"}, {"HOPPER", "p"},
                               {"SUDOKU", "1"}, {"WORDS", "2"}, {"PET", "3"}, {"DOODLE", "5"}, {"TIC TAC TOE", "6"}, {"BUBBLES", "7"}, {"ORACLE", "8"},
                               {"FLASHLIGHT", "l"}, {"MORSE", "o"}, {"FIVE", ""}, {"CODE", ""}, {"LIGHTS", ""}, {"SLIDE", ""},
-                              {"REFLEX", ""}, {"LIFE", ""}, {"METRONOME", ""}, {"LEVEL", ""}, {"CONVERT", ""}, {"DECIDE", ""}, {"METER", ""}, {"MULTIMETER", ""}, {"VOLTMETER", ""}};
+                              {"REFLEX", ""}, {"LIFE", ""}, {"METRONOME", ""}, {"LEVEL", ""}, {"CONVERT", ""}, {"DECIDE", ""}, {"METER", ""}, {"MULTIMETER", ""}, {"VOLTMETER", ""}, {"FILES", ""}, {"FILE MANAGER", ""}};
     for (int i = 0; i < (int)(sizeof(extra) / sizeof(extra[0])); i++) { String n = extra[i][0]; n.toLowerCase(); if (n.indexOf(lq) >= 0) res.push_back({3, i, String("APP  ") + extra[i][0]}); }
     std::vector<int> songs;
     searchSongs(q, songs, 6);
@@ -207,7 +208,7 @@ struct HomeApp : App {
       App* sub[] = {appCalc, appGraph, appResistor, appElec, appTimer, appSnake, app2048, appBlocks, appBreakout, appFlappy, appTyping, appRhythm,
                     appStarfall, appMines, appDuel, appEcho, appRunner, appMaze, appFour, appTanks, appRocks, appHopper,
                     appSudoku, appWords, appPet, appDoodle, appTtt, appBubbles, appOracle, appFlash, appMorse,
-                    appFive, appCode, appLights, appSlide, appReflex, appLife, appMetro, appLevel, appConvert, appDecide, appMeter, appMeter, appMeter};
+                    appFive, appCode, appLights, appSlide, appReflex, appLife, appMetro, appLevel, appConvert, appDecide, appMeter, appMeter, appMeter, appFiles, appFiles};
       openApp(sub[r.idx]);
     }
   }
@@ -505,6 +506,7 @@ static void bootAnim() {
 // ------------------------------------------------------------------ screensaver / sleep
 static uint32_t lastInput = 0;
 static bool saver = false, screenOff = false;
+bool screenIsOff() { return screenOff; }
 static void drawSaver() {
   static float ph = 0;
   ph += 0.02f;
@@ -548,7 +550,8 @@ static void kbDrain() {  // empty the keyboard chip's event queue so its INT lin
   M5.In_I2C.writeRegister8(KB_ADDR, 0x02, 0x01, 400000);
 }
 static void pushFrame();
-static bool swallowKeys = false;  // after waking: ignore keys until all are released
+static bool swallowKeys = false;
+bool keysLocked = false;  // after waking: ignore keys until all are released
 static void lightSleep() {
   auto& D = M5Cardputer.Display;
   bool adv = M5.getBoard() == m5::board_t::board_M5CardputerADV;
@@ -585,7 +588,7 @@ static void lightSleep() {
     Batt::tick();
     if (slept >= 180 || (!Batt::usb && Batt::pct >= 0 && Batt::mv > 2500 && Batt::mv < 3400)) { D.wakeup(); deepSleep(); }
   }
-  if (adv) kbDrain();
+  if (adv) { kbDrain(); kbReset(); }  // the drained queue held the "released" events
   swallowKeys = true;
   D.wakeup();
   invalidateFrame();
@@ -705,7 +708,7 @@ void setup() {
                                    {"TIMER", "STOPWATCH", IC_TIMER, &appTimer}, {"METRONOME", "TAP TEMPO", IC_METRO, &appMetro},
                                    {"FLASHLIGHT", "LIGHT / SOS", IC_FLASH, &appFlash}, {"MORSE", "BEEP CODE", IC_MORSE, &appMorse},
                                    {"LEVEL", "TILT METER", IC_LEVEL, &appLevel}, {"CONVERT", "UNITS", IC_CONV, &appConvert},
-                                   {"DECIDE", "WHEEL + VS", IC_DECIDE, &appDecide}, {"METER", "VOLT OHM LOGIC", IC_METER, &appMeter}}, accYel);
+                                   {"DECIDE", "WHEEL + VS", IC_DECIDE, &appDecide}, {"METER", "VOLT OHM LOGIC", IC_METER, &appMeter}, {"FILES", "SD CARD", IC_FILES, &appFiles}}, accYel);
   appGames = new MenuApp("GAMES", {{"STARFALL", "SHOOTER", IC_STARFALL, &appStarfall}, {"RUNNER", "ENDLESS", IC_RUNNER, &appRunner},
                                    {"SNAKE", "CLASSIC", IC_SNAKE, &appSnake}, {"BLOCKS", "LINE CLEAR", IC_BLOCKS, &appBlocks},
                                    {"MERGE", "NUMBERS", IC_2048, &app2048}, {"MINES", "LOGIC", IC_MINES, &appMines},
@@ -725,7 +728,7 @@ void setup() {
                                {"LIFE", "PIXEL LIFE", IC_LIFE, &appLife}}, accGreen);
   for (App* a : {appSudoku, appWords, appPet, appDoodle, appTtt, appBubbles, appOracle, appFive, appCode, appLights, appSlide, appReflex, appLife})
     a->parent = appFun;
-  for (App* a : {appCalc, appGraph, appResistor, appElec, appTimer, appMetro, appFlash, appMorse, appLevel, appConvert, appDecide, appMeter}) a->parent = appTools;
+  for (App* a : {appCalc, appGraph, appResistor, appElec, appTimer, appMetro, appFlash, appMorse, appLevel, appConvert, appDecide, appMeter, appFiles}) a->parent = appTools;
   for (App* a : {appSnake, app2048, appBlocks, appBreakout, appFlappy, appTyping, appRhythm, appStarfall, appMines, appDuel, appEcho, appRunner,
                  appMaze, appFour, appTanks, appRocks, appHopper})
     a->parent = appGames;
@@ -772,7 +775,7 @@ void setup() {
     if (f) f.close();
     SD.remove("/waveos/resume.txt");
     for (App* a : {appMusic, appSynth, appDrums, appIR, appNotes, appTools, appGames, appFun, appSettings, appCalc, appGraph, appResistor, appElec,
-                   appTimer, appMetro, appFlash, appMorse, appLevel, appConvert, appDecide, appMeter, appSnake, app2048, appBlocks, appBreakout,
+                   appTimer, appMetro, appFlash, appMorse, appLevel, appConvert, appDecide, appMeter, appFiles, appSnake, app2048, appBlocks, appBreakout,
                    appFlappy, appTyping, appRhythm, appStarfall, appMines, appDuel, appEcho, appRunner, appMaze, appFour, appTanks, appRocks,
                    appHopper, appSudoku, appWords, appPet, appDoodle, appTtt, appBubbles, appOracle, appFive, appCode, appLights, appSlide,
                    appReflex, appLife})
@@ -838,6 +841,7 @@ static void serialDev(std::vector<KeyEv>& keys) {
       else if (!strcmp(k, "TAB")) e.code = K_TAB; else if (!strcmp(k, "DEL")) e.code = K_BACK;
       else if (!strcmp(k, "UP")) { e.code = K_CHAR; e.ch = ';'; } else if (!strcmp(k, "DN")) { e.code = K_CHAR; e.ch = '.'; }
       else if (!strcmp(k, "LT")) { e.code = K_CHAR; e.ch = ','; } else if (!strcmp(k, "RT")) { e.code = K_CHAR; e.ch = '/'; }
+      else if (!strcmp(k, "~DEL")) { e.code = K_BACK; e.fn = true; }                 // Fn+Del
       else if (k[0] == '~' && k[1]) { e.code = K_CHAR; e.ch = k[1]; e.fn = true; }  // K~m = Fn+M
       else { e.code = K_CHAR; e.ch = k[0]; }
       keys.push_back(e);
@@ -882,11 +886,30 @@ void loop() {
   auto keys = pollKeys();
   serialDev(keys);
   bool g0 = M5Cardputer.BtnA.wasPressed();
+  // Fn+C key lock (pocket mode): only volume (- = _ +) and Fn+C itself get through
+  for (size_t i = 0; i < keys.size(); i++) {
+    const KeyEv& e = keys[i];
+    if (e.fn && e.code == K_CHAR && tolower(e.ch) == 'c' && !e.rep) {
+      keysLocked = !keysLocked;
+      if (!screenOff) toast(keysLocked ? "KEYS LOCKED  (FN+C TO UNLOCK)" : "KEYS UNLOCKED", 1200);
+      Audio::blip(keysLocked ? 660 : 990, 50);
+      keys.erase(keys.begin() + i); i--;
+      lastInput = millis();
+      continue;
+    }
+    if (!keysLocked) continue;
+    char c = e.code == K_CHAR ? e.ch : 0;
+    if (c == '-' || c == '_' || c == '=' || c == '+') { if (!e.fn) keys[i].fn = true; continue; }  // volume, in every app
+    if (!screenOff && !e.rep) { toast("LOCKED: FN+C TO UNLOCK", 900); lastInput = millis(); }
+    keys.erase(keys.begin() + i); i--;
+  }
+  if (keysLocked) heldKeys.clear();  // games read held keys directly
+  if (keysLocked && g0) { g0 = false; if (!screenOff) toast("LOCKED: FN+C TO UNLOCK", 900); }
   if (swallowKeys) {  // the key that woke the device does nothing
     if (M5Cardputer.Keyboard.keyList().empty() && !M5Cardputer.BtnA.isPressed()) swallowKeys = false;
     keys.clear(); g0 = false;
   }
-  bool anyInput = !keys.empty() || g0 || !heldKeys.empty();
+  bool anyInput = !keys.empty() || g0 || (!heldKeys.empty() && !keysLocked);
   if (screenOff && !keys.empty()) {  // screen off: media keys work without waking the screen
     bool media = true;
     for (auto& e : keys) {

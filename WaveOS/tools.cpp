@@ -183,7 +183,7 @@ struct CalcApp : App {
       in.set(""); recall = -1;
       return true;
     }
-    if (e.fn && e.code == K_CHAR && tolower(e.ch) == 'c') { histE.clear(); histR.clear(); in.set(""); return true; }
+    if (e.fn && e.code == K_CHAR && tolower(e.ch) == 'x') { histE.clear(); histR.clear(); in.set(""); return true; }
     if (e.fn && e.code == K_CHAR && (e.ch == 'h' || e.ch == 'H')) { help = true; return true; }
     if (e.code == K_CHAR && !e.fn && in.s.length() == 0 && strchr("+-*/^%", e.ch) && !histE.empty()) {
       in.set("ans");  // continue from previous answer
@@ -221,7 +221,7 @@ struct CalcApp : App {
       cv.fillRect(0, 125, 240, 10, T.bar);
     }
     hintBar({{"OK", "="}, {"FN^", "HIST"}, {"TAB", "DEG/RAD"}, {"FN+OK", "GRAPH"}});
-    if (help) helpOverlay("CALC", {"OK  EVALUATE", "FN+; .  HISTORY", "FN+, /  CURSOR", "TAB  DEG/RAD", "FN+C  CLEAR", "FN+OK  TO GRAPH",
+    if (help) helpOverlay("CALC", {"OK  EVALUATE", "FN+; .  HISTORY", "FN+, /  CURSOR", "TAB  DEG/RAD", "FN+X  CLEAR", "FN+OK  TO GRAPH",
                                    "ANS  LAST RESULT", "FUNCS", "SIN COS TAN", "ASIN ACOS ATAN", "SQRT ABS LN LOG", "EXP FLOOR CEIL", "PI E X !"});
   }
 };

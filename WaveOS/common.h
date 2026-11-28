@@ -54,7 +54,7 @@ enum IconId { IC_MUSIC, IC_SYNTH, IC_MIDI, IC_IR, IC_TOOLS, IC_NOTES, IC_GAMES, 
               IC_BREAKOUT, IC_FLAPPY, IC_TYPING, IC_RHYTHM, IC_DRUMS, IC_STARFALL, IC_MINES,
               IC_DUEL, IC_ECHO, IC_RUNNER, IC_MAZE, IC_FOUR, IC_TANKS, IC_ROCKS, IC_HOPPER, IC_TIMER, IC_FUN, IC_SUDOKU, IC_WORDS, IC_PET, IC_DOODLE,
               IC_TTT, IC_BUBBLES, IC_ORACLE, IC_WIFI, IC_FLASH, IC_MORSE,
-              IC_LIGHTS, IC_SLIDE, IC_REFLEX, IC_CODE, IC_FIVE, IC_LIFE, IC_METRO, IC_LEVEL, IC_CONV, IC_DECIDE, IC_METER, IC_COUNT };
+              IC_LIGHTS, IC_SLIDE, IC_REFLEX, IC_CODE, IC_FIVE, IC_LIFE, IC_METRO, IC_LEVEL, IC_CONV, IC_DECIDE, IC_METER, IC_FILES, IC_COUNT };
 
 // ---------------------------------------------------------------- input
 enum KeyCode : uint8_t { K_NONE, K_CHAR, K_UP, K_DOWN, K_LEFT, K_RIGHT, K_ENTER, K_BACK, K_ESC, K_TAB };
@@ -68,6 +68,8 @@ struct KeyEv {
   bool is(char c) const { return code == K_CHAR && !fn && (ch == c || ch == (c ^ 0x20)); }
 };
 std::vector<KeyEv> pollKeys();
+void kbReset();                       // forget all held keys (after the keyboard queue was emptied)
+extern bool keysLocked;               // Fn+C: everything but volume is ignored
 extern std::vector<char> heldKeys;  // un-shifted values of held non-modifier keys
 extern bool heldFn, heldShift;
 
@@ -122,7 +124,7 @@ extern App *appHome, *appMusic, *appSynth, *appIR, *appTools, *appNotes, *appGam
            *appFun, *appSudoku, *appWords, *appPet, *appDoodle, *appTtt, *appBubbles, *appOracle,
            *appWifi, *appFlash, *appMorse,
            *appLights, *appSlide, *appReflex, *appCode, *appFive, *appLife,
-           *appLevel, *appConvert, *appDecide, *appMeter;
+           *appLevel, *appConvert, *appDecide, *appMeter, *appFiles;
 
 // ---------------------------------------------------------------- settings
 struct Settings {
@@ -167,6 +169,8 @@ bool imuAccel(float& ax, float& ay, float& az);
 void searchSongs(const String& q, std::vector<int>& out, int max);
 String songPath(int idx);
 void playSong(int idx);
+int songIndex(const String& path);    // -1 if not in the music library
+String nowPlayingPath();
 void libEnsureScanned();
 int notesList(std::vector<String>& out);
 void openNote(const String& name);

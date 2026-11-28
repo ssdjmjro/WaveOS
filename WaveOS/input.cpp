@@ -17,6 +17,32 @@ KeyCode KeyEv::arrow() const {
 struct HK { int x, y; uint32_t t0, tl; };
 static std::vector<HK> prevKeys;
 
+// Cardputer ADV: the keyboard chip (TCA8418) sends "pressed" and "released" events through a 10-event
+// queue, and the M5 library takes only one event per loop. Typing fast while a frame is slow overflowed
+// the queue and lost a "released" event, so a key (e.g. backspace) stayed "held" and auto-repeated
+// forever, deleting everything. Now: the whole queue is read every poll, an overflow forgets all held
+// keys (press again and it works), and backspace / delete stop repeating after 3 seconds.
+static bool kbIsAdv() { static int a = -1; if (a < 0) a = M5.getBoard() == m5::board_t::board_M5CardputerADV; return a; }
+void kbReset() {
+  auto& kb = M5Cardputer.Keyboard;
+  const_cast<std::vector<Point2D_t>&>(kb.keyList()).clear();
+  prevKeys.clear();
+}
+static void kbService() {
+  if (!kbIsAdv()) return;
+  auto& kb = M5Cardputer.Keyboard;
+  for (int i = 0; i < 12; i++) kb.updateKeyList();  // returns at once when the queue is empty
+  static uint32_t t = 0;
+  if (millis() - t < 120) return;
+  t = millis();
+  uint8_t st = M5.In_I2C.readRegister8(0x34, 0x02, 400000);  // INT_STAT, bit 3 = queue overflowed
+  if (st & 0x08) {
+    M5.In_I2C.writeRegister8(0x34, 0x02, 0x08, 400000);
+    kbReset();
+    Serial.println("[kb] event queue overflow: held keys reset");
+  }
+}
+
 static bool isMod(uint8_t v) {
   return v == KEY_FN || v == KEY_LEFT_SHIFT || v == KEY_LEFT_CTRL || v == KEY_LEFT_ALT || v == KEY_OPT;
 }
@@ -24,6 +50,7 @@ static bool isMod(uint8_t v) {
 std::vector<KeyEv> pollKeys() {
   std::vector<KeyEv> out;
   auto& kb = M5Cardputer.Keyboard;
+  kbService();
   const auto& list = kb.keyList();
   bool fn = false, sh = false, ctrl = false, alt = false, opt = false;
   for (auto& p : list) {
@@ -50,7 +77,10 @@ std::vector<KeyEv> pollKeys() {
     for (auto& o : prevKeys)
       if (o.x == p.x && o.y == p.y) { hk = o; found = true; break; }
     if (!found) fire = true;
-    else if (now - hk.t0 > 420 && now - hk.tl > 65) { fire = true; rep = true; hk.tl = now; }
+    else if (now - hk.t0 > 420 && now - hk.tl > 65) {
+      fire = true; rep = true; hk.tl = now;
+      if (v == KEY_BACKSPACE && now - hk.t0 > 3000) fire = false;  // runaway delete guard
+    }
     next.push_back(hk);
     if (!fire) continue;
     KeyEv e;

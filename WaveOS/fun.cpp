@@ -288,6 +288,7 @@ struct PetApp : App {
 struct DoodleApp : App {
   static constexpr int CW = 48, CH = 22, PXS = 5, OX = 0, OY = 13;
   uint8_t px[CH][CW];
+  uint8_t (*undo)[CW] = nullptr;  // the picture before the last clear (Fn+Z brings it back)
   int cx = 24, cy = 11, col = 1;
   bool pen = false;
   DoodleApp() { name = "DOODLE"; memset(px, 0, sizeof(px)); }
@@ -328,6 +329,15 @@ struct DoodleApp : App {
     f.close();
     toast(p + 9, 1500);
   }
+  void clearAll() {
+    bool empty = true;
+    for (int y = 0; y < CH && empty; y++) for (int x = 0; x < CW; x++) if (px[y][x]) { empty = false; break; }
+    if (empty) return;
+    if (!undo) undo = new (std::nothrow) uint8_t[CH][CW];
+    if (undo) memcpy(undo, px, sizeof(px));
+    memset(px, 0, sizeof(px));
+    toast(undo ? "CLEARED  (FN+Z = UNDO)" : "CLEARED", 1200);
+  }
   bool key(const KeyEv& e) override {
     KeyCode k = fdir(e);
     if (k != K_NONE) {
@@ -337,13 +347,18 @@ struct DoodleApp : App {
     }
     if (e.code == K_ENTER || (e.code == K_CHAR && e.ch == ' ')) { px[cy][cx] = px[cy][cx] == col ? 0 : col; return true; }
     if (e.code == K_TAB) { pen = !pen; if (pen) px[cy][cx] = col; toast(pen ? "PEN DOWN (DRAWS AS YOU MOVE)" : "PEN UP", 800); return true; }
+    if (e.code == K_BACK && e.fn) { clearAll(); return true; }  // Fn+Del: clear the whole picture
     if (e.code == K_BACK) { px[cy][cx] = 0; return true; }
+    if (e.code == K_CHAR && e.fn && tolower(e.ch) == 'z') {
+      if (!undo) { toast("NOTHING TO UNDO", 700); return true; }
+      memcpy(px, undo, sizeof(px)); delete[] undo; undo = nullptr; toast("UNDONE", 700); return true;
+    }
     if (e.code != K_CHAR) return false;
     if (e.ch >= '0' && e.ch <= '9') { col = e.ch - '0'; return true; }
     if (e.fn && tolower(e.ch) == 's') { saveBmp(); return true; }
     switch (tolower(e.ch)) {
       case 'f': fill(cx, cy, px[cy][cx], col); return true;
-      case 'x': memset(px, 0, sizeof(px)); toast("CLEARED", 600); return true;
+      case 'x': clearAll(); return true;
       case 'm': for (int y = 0; y < CH; y++) for (int x = 0; x < CW / 2; x++) px[y][CW - 1 - x] = px[y][x]; toast("MIRRORED", 600); return true;
     }
     return false;
@@ -363,8 +378,8 @@ struct DoodleApp : App {
       cv.fillRect(x, 2, 7, 7, i == 0 ? T.bg2 : pal(i));
       if (i == col) frame(x - 1, 1, 9, 9, T.white);
     }
-    text(162, 2, pen ? "PEN" : "", T.yel, 1, false);
-    hintBar({{"SPC", "DOT"}, {"TAB", "PEN"}, {"F", "FILL"}, {"0-9", "COLOR"}, {"FN+S", "SAVE"}});
+    if (pen) text(46, 2, "PEN", T.yel, 1, false);
+    hintBar({{"SPC", "DOT"}, {"TAB", "PEN"}, {"F", "FILL"}, {"FN+DEL", "CLEAR"}, {"FN+S", "SAVE"}});
   }
 };
 
